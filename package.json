@@ -1,0 +1,27 @@
+{
+  "name": "backend-pfm",
+  "version": "1.0.0",
+  "description": "PFM backend foundation using Hono + MongoDB",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js",
+    "db:init": "node scripts/init-db.js",
+    "db:seed": "node scripts/seed-basic-data.js",
+    "gen:token": "node scripts/generate-token.js"
+  },
+  "engines": {
+    "node": "20.18.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "dotenv": "^17.4.2",
+    "hono": "^3.12.12",
+    "jsonwebtoken": "^9.0.3",
+    "mongodb": "^5.9.2"
+  }
+}

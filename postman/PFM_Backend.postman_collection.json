@@ -1,0 +1,517 @@
+{
+  "info": {
+    "_postman_id": "8b99e511-5fbb-4ddd-9183-dff7a2df4068",
+    "name": "PFM Backend API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Postman collection for backend-pfm APIs (auth, patients, queue, modules, health checks)."
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const reqName = pm.info.requestName || '';",
+          "if (reqName.toLowerCase().includes('login') || reqName.toLowerCase().includes('check db')) {",
+          "  return;",
+          "}",
+          "const token = pm.environment.get('token');",
+          "if (token) {",
+          "  pm.request.headers.upsert({ key: 'Authorization', value: `Bearer ${token}` });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ""
+              ]
+            }
+          }
+        },
+        {
+          "name": "Check DB (No Auth)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/check-db",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "check-db"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Check Auth",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/check-auth",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "check-auth"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login (Auto Save Token)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "let data = {};",
+                  "try { data = pm.response.json(); } catch (e) {}",
+                  "",
+                  "if (data && data.token) {",
+                  "  pm.environment.set('token', data.token);",
+                  "}",
+                  "if (data && data.staff && data.staff.clinic_id) {",
+                  "  pm.environment.set('clinic_id', data.staff.clinic_id);",
+                  "}",
+                  "if (data && data.staff && Array.isArray(data.staff.allowed_rooms) && data.staff.allowed_rooms.length > 0) {",
+                  "  pm.environment.set('room_id', data.staff.allowed_rooms[0]);",
+                  "}",
+                  "",
+                  "pm.test('Token has been saved to environment', function () {",
+                  "  pm.expect(pm.environment.get('token')).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "login"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Modules",
+      "item": [
+        {
+          "name": "Get Floor-Room",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/modules/floor-room",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "modules",
+                "floor-room"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Patients",
+      "item": [
+        {
+          "name": "Create Patient + Queue (Auto Save IDs)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "let data = {};",
+                  "try { data = pm.response.json(); } catch (e) {}",
+                  "",
+                  "if (data.patient_id) pm.environment.set('patient_id', data.patient_id);",
+                  "if (data.queue_id) pm.environment.set('queue_id', data.queue_id);",
+                  "if (data.queue_number !== undefined) pm.environment.set('queue_number', String(data.queue_number));",
+                  "",
+                  "pm.test('Saved patient_id and queue_id', function () {",
+                  "  pm.expect(pm.environment.get('patient_id')).to.be.a('string').and.not.empty;",
+                  "  pm.expect(pm.environment.get('queue_id')).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"his_id\": \"{{his_id}}\",\n  \"full_name\": \"{{patient_name}}\",\n  \"dob\": \"1985\",\n  \"address\": \"HCM\",\n  \"is_priority\": false,\n  \"is_online_booking\": false,\n  \"room_id\": \"{{room_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/patients",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "patients"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Patient QR",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/patients/{{patient_id}}/qr",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "patients",
+                "{{patient_id}}",
+                "qr"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Queue",
+      "item": [
+        {
+          "name": "Get Queue By Room",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue?room_id={{room_id}}&status=WAITING,PROCESSING",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue"
+              ],
+              "query": [
+                {
+                  "key": "room_id",
+                  "value": "{{room_id}}"
+                },
+                {
+                  "key": "status",
+                  "value": "WAITING,PROCESSING"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Call Queue",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/{{queue_id}}/call",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "{{queue_id}}",
+                "call"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Scan Queue (KingPOS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"qr_content\": \"pfm://checkin/{{patient_id}}\",\n  \"room_id\": \"{{room_id}}\",\n  \"device_type\": \"KINGPOS\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/scan",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "scan"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Skip Queue",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Patient not available\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/{{queue_id}}/skip",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "{{queue_id}}",
+                "skip"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Complete Queue (End Visit)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"end_visit\": true,\n  \"note\": \"Done\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/{{queue_id}}/complete",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "{{queue_id}}",
+                "complete"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Complete Queue (Next Room)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let data = {};",
+                  "try { data = pm.response.json(); } catch (e) {}",
+                  "if (data.next_queue_id) {",
+                  "  pm.environment.set('queue_id', data.next_queue_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"next_room_id\": \"{{next_room_id}}\",\n  \"note\": \"Move next room\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/{{queue_id}}/complete",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "{{queue_id}}",
+                "complete"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Transfer Queue",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let data = {};",
+                  "try { data = pm.response.json(); } catch (e) {}",
+                  "if (data.new_queue_id) {",
+                  "  pm.environment.set('queue_id', data.new_queue_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to_room_id\": \"{{next_room_id}}\",\n  \"note\": \"manual transfer\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/{{queue_id}}/transfer",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "{{queue_id}}",
+                "transfer"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Reorder Queue",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"room_id\": \"{{room_id}}\",\n  \"order\": [\"{{queue_id}}\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/queue/reorder",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "queue",
+                "reorder"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    }
+  ]
+}
