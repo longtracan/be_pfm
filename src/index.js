@@ -9,6 +9,7 @@ import authRoute from "./routes/auth.js";
 import modulesRoute from "./routes/modules.js";
 import patientsRoute from "./routes/patients.js";
 import queueRoute from "./routes/queue.js";
+import eventsRoute from "./routes/events.js";
 import { connectMongo, closeMongo } from "./lib/mongo.js";
 
 dotenv.config();
@@ -38,6 +39,7 @@ app.route("/api", authRoute);
 app.route("/api", modulesRoute);
 app.route("/api", patientsRoute);
 app.route("/api", queueRoute);
+app.route("/api", eventsRoute);
 
 const port = Number(process.env.PORT || 3000);
 

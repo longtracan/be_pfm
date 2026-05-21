@@ -21,8 +21,25 @@ import {
   updateQueueStatus,
   upsertPatient,
 } from "../lib/queue-service.js";
+import { emitQueueUpdate } from "../lib/queue-events.js";
 
 const route = new Hono();
+
+/** Emit SSE snapshot for a room after any mutation */
+async function broadcastRoom(db, roomId) {
+  try {
+    const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
+    const roomName = roomDoc?.room_name || roomId;
+    const docs  = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES);
+    const items = [];
+    for (const doc of docs) {
+      items.push(await toQueueView(db, doc));
+    }
+    emitQueueUpdate(roomId, roomName, items);
+  } catch {
+    // best-effort — never crash the response
+  }
+}
 
 function canAccessRoom(auth, roomId) {
   if (!auth) return false;
@@ -95,16 +112,28 @@ route.post(
 
     let patient = null;
 
-    if (parsedQr.type === "uri") {
-      patient = await findPatientById(db, parsedQr.patient_id);
-      if (!patient) {
-        return c.json({ ok: false, error: "patient_not_found" }, 404);
+    try {
+      if (parsedQr.type === "uri") {
+        patient = await findPatientById(db, parsedQr.patient_id);
+        if (!patient) {
+          return c.json({ ok: false, error: "patient_not_found" }, 404);
+        }
+      } else {
+        patient = await upsertPatient(db, parsedQr.patient || parsePatientPayload(parsedQr.source_payload || {}));
       }
-    } else {
-      patient = await upsertPatient(db, parsedQr.patient || parsePatientPayload(parsedQr.source_payload || {}));
+    } catch (err) {
+      console.error("[scan] upsertPatient error:", err.message);
+      return c.json({ ok: false, error: "patient_upsert_failed", detail: err.message }, 500);
     }
 
-    await ensureRoomExists(db, roomId);
+    try {
+      await ensureRoomExists(db, roomId);
+    } catch (err) {
+      if (String(err.message).startsWith("room_not_found")) {
+        return c.json({ ok: false, error: "room_not_found", room_id: roomId }, 404);
+      }
+      throw err;
+    }
 
     const existingQueue = await findLatestActiveQueueForPatientRoom(db, patient._id, roomId);
     if (existingQueue) {
@@ -117,6 +146,7 @@ route.post(
           eventType: "AUTO_RETURN_FOR_RESULT",
         });
 
+        broadcastRoom(db, existingQueue.room_id);
         return c.json({
           ok: true,
           action: "AUTO_CHO_TAI_KHAM",
@@ -151,6 +181,9 @@ route.post(
       createdBy: auth.user_id,
       note: "scan_create_queue",
     });
+
+    // Broadcast after new queue created
+    broadcastRoom(db, roomId);
 
     return c.json({
       ok: true,
@@ -200,7 +233,7 @@ route.put(
       return c.json({ ok: false, error: "another_patient_processing" }, 409);
     }
 
-    const updated = await updateQueueStatus(db, {
+    const updatedCall = await updateQueueStatus(db, {
       queue,
       status: QUEUE_STATUS.DANG_KHAM,
       actorUserId: auth.user_id,
@@ -208,7 +241,8 @@ route.put(
       eventType: "CALL_PATIENT",
     });
 
-    return c.json({ ok: true, queue: await toQueueView(db, updated) });
+    broadcastRoom(db, queue.room_id);
+    return c.json({ ok: true, queue: await toQueueView(db, updatedCall) });
   }
 );
 
@@ -238,7 +272,7 @@ route.put(
       return c.json({ ok: false, error: "queue_not_in_exam_state" }, 409);
     }
 
-    const updated = await updateQueueStatus(db, {
+    const updatedComplete = await updateQueueStatus(db, {
       queue,
       status: QUEUE_STATUS.HOAN_THANH,
       actorUserId: auth.user_id,
@@ -246,7 +280,8 @@ route.put(
       eventType: "COMPLETE_PATIENT",
     });
 
-    return c.json({ ok: true, queue: await toQueueView(db, updated) });
+    broadcastRoom(db, queue.room_id);
+    return c.json({ ok: true, queue: await toQueueView(db, updatedComplete) });
   }
 );
 
@@ -289,18 +324,17 @@ route.patch(
       }
     }
 
-    const updated = await updateQueueStatus(db, {
+    const updatedStatus = await updateQueueStatus(db, {
       queue,
       status: nextStatus,
       actorUserId: auth.user_id,
       note: note || "manual_status_update",
       eventType: "STATUS_MANUAL_OVERRIDE",
-      payload: {
-        source: "manual",
-      },
+      payload: { source: "manual" },
     });
 
-    return c.json({ ok: true, queue: await toQueueView(db, updated) });
+    broadcastRoom(db, queue.room_id);
+    return c.json({ ok: true, queue: await toQueueView(db, updatedStatus) });
   }
 );
 
@@ -363,7 +397,42 @@ route.patch(
       items.push(await toQueueView(db, doc));
     }
 
+    const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
+    emitQueueUpdate(roomId, roomDoc?.room_name || roomId, items);
     return c.json({ ok: true, room_id: roomId, items, total: items.length });
+  }
+);
+
+// Skip a patient (move to SKIPPED status without completing exam)
+route.put(
+  "/v1/queue/:id/skip",
+  authMiddleware,
+  requireRole(["super_admin", "admin", "nurse"]),
+  async (c) => {
+    const db = getDb();
+    const auth = c.get("auth");
+    const body = await c.req.json().catch(() => ({}));
+    let queueId;
+    try {
+      queueId = parseQueueId(c.req.param("id"));
+    } catch {
+      return c.json({ ok: false, error: "invalid_queue_id" }, 400);
+    }
+    const queue = await findQueueById(db, queueId);
+    if (!queue) {
+      return c.json({ ok: false, error: "queue_not_found" }, 404);
+    }
+
+    const updatedSkip = await updateQueueStatus(db, {
+      queue,
+      status: QUEUE_STATUS.SKIPPED,
+      actorUserId: auth.user_id,
+      note: body.note || "skipped",
+      eventType: "SKIP_PATIENT",
+    });
+
+    broadcastRoom(db, queue.room_id);
+    return c.json({ ok: true, queue: await toQueueView(db, updatedSkip) });
   }
 );
 

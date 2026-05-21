@@ -10,7 +10,7 @@ const token = jwt.sign(
     user_id: "staff_001",
     username: "staff_001",
     role: "admin",
-    allowed_rooms: ["ROOM_01", "ROOM_02"],
+    allowed_rooms: ["room_sieu_am", "room_noi"],
   },
   secret,
   { expiresIn: "8h" }
