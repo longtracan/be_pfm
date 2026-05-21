@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
+import { cors } from "hono/cors";
 import dotenv from "dotenv";
 import checkDbRoute from "./routes/check-db.js";
 import checkAuthRoute from "./routes/check-auth.js";
@@ -14,6 +15,14 @@ dotenv.config();
 
 const app = new Hono();
 app.use("*", logger());
+app.use(
+  "*",
+  cors({
+    origin: "*",
+    allowHeaders: ["Authorization", "Content-Type"],
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  })
+);
 
 app.get("/", (c) =>
   c.json({

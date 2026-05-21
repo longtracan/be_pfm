@@ -5,7 +5,6 @@ dotenv.config();
 
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB_NAME || "pfm_dts";
-const clinicId = process.env.SEED_CLINIC_ID || "clinic_001";
 
 if (!uri) {
   throw new Error("Missing MONGODB_URI. Please set it in .env");
@@ -16,21 +15,6 @@ async function main() {
   await client.connect();
   const db = client.db(dbName);
   const now = new Date();
-
-  await db.collection("floors").updateOne(
-    { floor_id: "floor1" },
-    {
-      $set: {
-        floor_id: "floor1",
-        floor_name: "Floor 1",
-        order: 1,
-        is_active: true,
-        updated_at: now,
-      },
-      $setOnInsert: { created_at: now },
-    },
-    { upsert: true }
-  );
 
   await db.collection("floors").updateOne(
     { floor_id: "floor2" },
@@ -47,14 +31,13 @@ async function main() {
     { upsert: true }
   );
 
-  await db.collection("rooms").updateOne(
-    { room_id: "room_x_quang" },
+  await db.collection("floors").updateOne(
+    { floor_id: "floor3" },
     {
       $set: {
-        room_id: "room_x_quang",
-        room_name: "Room X Quang",
-        floor_id: "floor1",
-        order: 1,
+        floor_id: "floor3",
+        floor_name: "Floor 3",
+        order: 3,
         is_active: true,
         updated_at: now,
       },
@@ -68,8 +51,24 @@ async function main() {
     {
       $set: {
         room_id: "room_sieu_am",
-        room_name: "Room Sieu Am",
+        room_name: "Phòng Siêu Âm",
         floor_id: "floor2",
+        order: 1,
+        is_active: true,
+        updated_at: now,
+      },
+      $setOnInsert: { created_at: now },
+    },
+    { upsert: true }
+  );
+
+  await db.collection("rooms").updateOne(
+    { room_id: "room_noi" },
+    {
+      $set: {
+        room_id: "room_noi",
+        room_name: "Phòng Khám Nội",
+        floor_id: "floor3",
         order: 1,
         is_active: true,
         updated_at: now,
@@ -81,16 +80,16 @@ async function main() {
 
   const staffSeeds = [
     {
-      username: "super_admiin",
-      full_name: "Super Admiin",
+      username: "superadmin",
+      full_name: "Super Admin",
       role: "super_admin",
-      allowed_rooms: ["room_x_quang", "room_sieu_am"],
+      allowed_rooms: ["room_sieu_am", "room_noi"],
     },
     {
-      username: "staff_receptionist",
-      full_name: "Staff Receptionist",
-      role: "receptionist",
-      allowed_rooms: ["room_x_quang", "room_sieu_am"],
+      username: "manager",
+      full_name: "Manager",
+      role: "admin",
+      allowed_rooms: ["room_sieu_am", "room_noi"],
     },
     {
       username: "staff_sieu_am",
@@ -99,22 +98,21 @@ async function main() {
       allowed_rooms: ["room_sieu_am"],
     },
     {
-      username: "staff_x_quang",
-      full_name: "Staff X Quang",
+      username: "staff_noi",
+      full_name: "Staff Noi",
       role: "nurse",
-      allowed_rooms: ["room_x_quang"],
+      allowed_rooms: ["room_noi"],
     },
   ];
 
   for (const staff of staffSeeds) {
     await db.collection("staff_users").updateOne(
-      { username: staff.username, clinic_id: clinicId },
+      { username: staff.username },
       {
         $set: {
           username: staff.username,
           full_name: staff.full_name,
           role: staff.role,
-          clinic_id: clinicId,
           allowed_rooms: staff.allowed_rooms,
           is_active: true,
           updated_at: now,

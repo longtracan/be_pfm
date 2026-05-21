@@ -1,91 +1,78 @@
 import { Hono } from "hono";
 import { ObjectId } from "mongodb";
-import { authMiddleware, requireRole, requireRoomAccess } from "../middleware/auth.js";
+import { authMiddleware, requireRole } from "../middleware/auth.js";
 import { getDb } from "../lib/mongo.js";
-import { createQueueItem } from "../lib/queue-service.js";
+import {
+  buildPatientQrPayload,
+  parsePatientPayload,
+  upsertPatient,
+} from "../lib/queue-service.js";
 
 const route = new Hono();
+
+function serializePatient(patient) {
+  if (!patient) return null;
+  return {
+    id: String(patient._id),
+    patient_key: patient.patient_key,
+    medical_code: patient.medical_code,
+    identity_number: patient.identity_number,
+    full_name: patient.full_name,
+    dob: patient.dob,
+    gender: patient.gender || "",
+    address: patient.address || "",
+    address_cv30: patient.address_cv30 || "",
+    is_priority: !!patient.is_priority,
+    is_online_booking: !!patient.is_online_booking,
+    created_at: patient.created_at,
+    updated_at: patient.updated_at,
+  };
+}
 
 route.post(
   "/v1/patients",
   authMiddleware,
-  requireRole(["super_admin", "receptionist", "admin", "nurse"]),
-  requireRoomAccess("room_id"),
+  requireRole(["super_admin", "admin", "receptionist", "nurse"]),
   async (c) => {
     const db = getDb();
-    const auth = c.get("auth");
-    const body = c.get("requestBody") || {};
+    const body = await c.req.json().catch(() => ({}));
+    const parsed = parsePatientPayload(body);
 
-    const hisId = String(body.his_id || "").trim();
-    const fullName = String(body.full_name || "").trim();
-    const dob = String(body.dob || "").trim();
-    const roomId = String(body.room_id || "").trim();
-    const clinicId = auth.clinic_id;
-
-    if (!hisId || !fullName || !dob || !roomId) {
-      return c.json({ ok: false, error: "missing_required_fields" }, 400);
-    }
-
-    const now = new Date();
-    const patients = db.collection("patients");
-    const existing = await patients.findOne({ his_id: hisId, clinic_id: clinicId });
-
-    let patientId;
-    if (existing) {
-      patientId = existing._id;
-      await patients.updateOne(
-        { _id: existing._id },
-        {
-          $set: {
-            full_name: fullName,
-            dob,
-            address: body.address || "",
-            is_priority: !!body.is_priority,
-            is_online_booking: !!body.is_online_booking,
-            updated_at: now,
-          },
-        }
+    if (!parsed.medical_code || !parsed.identity_number || !parsed.full_name) {
+      return c.json(
+        { ok: false, error: "medical_code_identity_number_full_name_required" },
+        400
       );
-    } else {
-      const inserted = await patients.insertOne({
-        his_id: hisId,
-        full_name: fullName,
-        dob,
-        address: body.address || "",
-        is_priority: !!body.is_priority,
-        is_online_booking: !!body.is_online_booking,
-        clinic_id: clinicId,
-        created_at: now,
-        updated_at: now,
-      });
-      patientId = inserted.insertedId;
     }
 
-    const queue = await createQueueItem({
-      db,
-      patientId,
-      clinicId,
-      roomId,
-      isPriority: !!body.is_priority,
-      createdBy: auth.user_id,
-      note: "created_from_patients_api",
+    const patient = await upsertPatient(db, parsed);
+    const qrPayload = buildPatientQrPayload(patient);
+    const qrContent = JSON.stringify(qrPayload);
+
+    return c.json({
+      ok: true,
+      patient: serializePatient(patient),
+      qr_content: qrContent,
+      qr_base64: `data:text/plain;base64,${Buffer.from(qrContent).toString("base64")}`,
+      qr_uri: `pfm://checkin/${String(patient._id)}`,
     });
-
-    const qrContent = `pfm://checkin/${String(patientId)}`;
-    const qrBase64 = Buffer.from(qrContent).toString("base64");
-
-    return c.json(
-      {
-        ok: true,
-        patient_id: String(patientId),
-        queue_id: String(queue._id),
-        queue_number: queue.queue_number,
-        qr_base64: `data:text/plain;base64,${qrBase64}`,
-      },
-      201
-    );
   }
 );
+
+route.get("/v1/patients/:id", authMiddleware, async (c) => {
+  const db = getDb();
+  const id = c.req.param("id");
+  if (!ObjectId.isValid(id)) {
+    return c.json({ ok: false, error: "invalid_patient_id" }, 400);
+  }
+
+  const patient = await db.collection("patients").findOne({ _id: new ObjectId(id) });
+  if (!patient) {
+    return c.json({ ok: false, error: "patient_not_found" }, 404);
+  }
+
+  return c.json({ ok: true, patient: serializePatient(patient) });
+});
 
 route.get("/v1/patients/:id/qr", authMiddleware, async (c) => {
   const db = getDb();
@@ -99,9 +86,16 @@ route.get("/v1/patients/:id/qr", authMiddleware, async (c) => {
     return c.json({ ok: false, error: "patient_not_found" }, 404);
   }
 
-  const qrContent = `pfm://checkin/${id}`;
-  const qrBase64 = Buffer.from(qrContent).toString("base64");
-  return c.json({ ok: true, qr_base64: `data:text/plain;base64,${qrBase64}` });
+  const qrPayload = buildPatientQrPayload(patient);
+  const qrContent = JSON.stringify(qrPayload);
+
+  return c.json({
+    ok: true,
+    patient: serializePatient(patient),
+    qr_content: qrContent,
+    qr_base64: `data:text/plain;base64,${Buffer.from(qrContent).toString("base64")}`,
+    qr_uri: `pfm://checkin/${String(patient._id)}`,
+  });
 });
 
 export default route;

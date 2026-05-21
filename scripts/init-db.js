@@ -27,6 +27,7 @@ async function main() {
 
   await createCollectionIfNeeded(db, "patients");
   await createCollectionIfNeeded(db, "queues");
+  await createCollectionIfNeeded(db, "queue_events");
   await createCollectionIfNeeded(db, "devices");
   await createCollectionIfNeeded(db, "staff_users");
   await createCollectionIfNeeded(db, "floors");
@@ -34,18 +35,23 @@ async function main() {
   await createCollectionIfNeeded(db, "counters");
 
   await db.collection("patients").createIndexes([
-    { key: { his_id: 1, clinic_id: 1 }, unique: true, name: "uq_his_id_clinic_id" },
+    { key: { patient_key: 1 }, unique: true, name: "uq_patient_key" },
+    { key: { medical_code: 1, identity_number: 1 }, name: "idx_patient_identifiers" },
     { key: { created_at: -1 }, name: "idx_patients_created_at_desc" },
   ]);
 
   await db.collection("queues").createIndexes([
-    {
-      key: { "location.id": 1, status: 1, order: 1 },
-      name: "idx_queues_location_status_order",
-    },
+    { key: { room_id: 1, queue_date: 1, queue_number: 1 }, unique: true, name: "uq_room_date_queue_number" },
+    { key: { room_id: 1, status: 1, priority_rank: 1, order_rank: 1 }, name: "idx_queues_room_status_rank" },
     { key: { patient_id: 1 }, name: "idx_queues_patient_id" },
+    { key: { patient_key: 1, room_id: 1, status: 1 }, name: "idx_queues_patient_room_status" },
     { key: { created_at: -1 }, name: "idx_queues_created_at_desc" },
-    { key: { clinic_id: 1, created_at: -1 }, name: "idx_queues_clinic_created_at_desc" },
+  ]);
+
+  await db.collection("queue_events").createIndexes([
+    { key: { queue_id: 1, occurred_at: -1 }, name: "idx_queue_events_queue_time" },
+    { key: { room_id: 1, occurred_at: -1 }, name: "idx_queue_events_room_time" },
+    { key: { event_type: 1, occurred_at: -1 }, name: "idx_queue_events_type_time" },
   ]);
 
   await db.collection("devices").createIndexes([
@@ -59,8 +65,9 @@ async function main() {
   ]);
 
   await db.collection("staff_users").createIndexes([
-    { key: { username: 1, clinic_id: 1 }, unique: true, name: "uq_staff_username_clinic_id" },
-    { key: { clinic_id: 1, role: 1 }, name: "idx_staff_clinic_role" },
+    { key: { username: 1 }, unique: true, name: "uq_staff_username" },
+    { key: { role: 1 }, name: "idx_staff_role" },
+    { key: { allowed_rooms: 1 }, name: "idx_staff_allowed_rooms" },
     { key: { is_active: 1 }, name: "idx_staff_active" },
   ]);
 
@@ -76,11 +83,7 @@ async function main() {
   ]);
 
   await db.collection("counters").createIndexes([
-    {
-      key: { clinic_id: 1, date_key: 1, type: 1 },
-      unique: true,
-      name: "uq_counters_clinic_date_type",
-    },
+    { key: { room_id: 1, date_key: 1, type: 1 }, unique: true, name: "uq_counters_room_date_type" },
   ]);
 
   console.log(`[init-db] done for db: ${db.databaseName}`);

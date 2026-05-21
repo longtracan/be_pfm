@@ -37,12 +37,14 @@ export function requireRoomAccess(roomField = "room_id") {
     const auth = c.get("auth");
     if (!auth) return c.json({ ok: false, error: "unauthorized" }, 401);
 
+    const body = c.req.method === "GET" ? {} : await c.req.json().catch(() => ({}));
+    c.set("requestBody", body);
+
     if (auth.role === "super_admin") {
       await next();
       return;
     }
 
-    const body = c.req.method === "GET" ? {} : await c.req.json().catch(() => ({}));
     const roomId = c.req.query(roomField) || body[roomField];
     if (!roomId) {
       return c.json({ ok: false, error: "room_id_required" }, 400);

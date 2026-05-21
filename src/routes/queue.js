@@ -1,20 +1,46 @@
 import { Hono } from "hono";
-import { ObjectId } from "mongodb";
 import {
-  authMiddleware,
-  requireRole,
-  requireRoomAccess,
-} from "../middleware/auth.js";
+  ACTIVE_QUEUE_STATUSES,
+  QUEUE_STATUS,
+  WAITING_QUEUE_STATUSES,
+} from "../lib/constants.js";
+import { authMiddleware, requireRole, requireRoomAccess } from "../middleware/auth.js";
 import { getDb } from "../lib/mongo.js";
-import { QUEUE_STATUS } from "../lib/constants.js";
 import {
   createQueueItem,
   ensureRoomExists,
+  findLatestActiveQueueForPatientRoom,
+  findPatientById,
+  findQueueById,
+  getRoomQueues,
+  moveQueuePosition,
+  parsePatientPayload,
+  parseQrContent,
   parseQueueId,
   toQueueView,
+  updateQueueStatus,
+  upsertPatient,
 } from "../lib/queue-service.js";
 
 const route = new Hono();
+
+function canAccessRoom(auth, roomId) {
+  if (!auth) return false;
+  if (auth.role === "super_admin") return true;
+  return Array.isArray(auth.allowed_rooms) && auth.allowed_rooms.includes(roomId);
+}
+
+function isValidQueueStatus(status) {
+  return Object.values(QUEUE_STATUS).includes(status);
+}
+
+async function ensureQueueRoomAccessOrThrow(c, queue) {
+  const auth = c.get("auth");
+  if (!canAccessRoom(auth, queue.room_id)) {
+    return c.json({ ok: false, error: "forbidden_room_access" }, 403);
+  }
+  return null;
+}
 
 route.get(
   "/v1/queue",
@@ -23,24 +49,120 @@ route.get(
   requireRoomAccess("room_id"),
   async (c) => {
     const db = getDb();
-    const roomId = c.req.query("room_id");
-    const statusRaw = c.req.query("status");
+    const roomId = String(c.req.query("room_id") || "").trim();
+    const statusRaw = String(c.req.query("status") || "").trim();
+    if (!roomId) {
+      return c.json({ ok: false, error: "room_id_required" }, 400);
+    }
     const statuses = statusRaw
-      ? statusRaw.split(",").map((s) => s.trim()).filter(Boolean)
-      : [QUEUE_STATUS.WAITING, QUEUE_STATUS.PROCESSING];
+      ? statusRaw
+          .split(",")
+          .map((item) => item.trim())
+          .filter((item) => item && isValidQueueStatus(item))
+      : ACTIVE_QUEUE_STATUSES;
+    const effectiveStatuses = statuses.length > 0 ? statuses : ACTIVE_QUEUE_STATUSES;
 
-    const docs = await db
-      .collection("queues")
-      .find({ room_id: roomId, status: { $in: statuses } })
-      .sort({ order: 1, created_at: 1 })
-      .toArray();
-
+    const docs = await getRoomQueues(db, roomId, effectiveStatuses);
     const items = [];
     for (const doc of docs) {
       items.push(await toQueueView(db, doc));
     }
 
     return c.json({ ok: true, room_id: roomId, items, total: items.length });
+  }
+);
+
+route.post(
+  "/v1/queue/scan",
+  authMiddleware,
+  requireRole(["super_admin", "admin", "nurse", "receptionist"]),
+  requireRoomAccess("room_id"),
+  async (c) => {
+    const db = getDb();
+    const auth = c.get("auth");
+    const body = c.get("requestBody") || {};
+    const roomId = String(body.room_id || "").trim();
+    const rawQrContent = String(body.qr_content || body.qr || "").trim();
+
+    if (!roomId) {
+      return c.json({ ok: false, error: "room_id_required" }, 400);
+    }
+
+    const parsedQr = parseQrContent(rawQrContent);
+    if (!parsedQr) {
+      return c.json({ ok: false, error: "invalid_qr_content" }, 400);
+    }
+
+    let patient = null;
+
+    if (parsedQr.type === "uri") {
+      patient = await findPatientById(db, parsedQr.patient_id);
+      if (!patient) {
+        return c.json({ ok: false, error: "patient_not_found" }, 404);
+      }
+    } else {
+      patient = await upsertPatient(db, parsedQr.patient || parsePatientPayload(parsedQr.source_payload || {}));
+    }
+
+    await ensureRoomExists(db, roomId);
+
+    const existingQueue = await findLatestActiveQueueForPatientRoom(db, patient._id, roomId);
+    if (existingQueue) {
+      if (existingQueue.status === QUEUE_STATUS.CHO_KET_QUA) {
+        const updatedQueue = await updateQueueStatus(db, {
+          queue: existingQueue,
+          status: QUEUE_STATUS.CHO_TAI_KHAM,
+          actorUserId: auth.user_id,
+          note: "auto_return_for_result_scan",
+          eventType: "AUTO_RETURN_FOR_RESULT",
+        });
+
+        return c.json({
+          ok: true,
+          action: "AUTO_CHO_TAI_KHAM",
+          patient: {
+            id: String(patient._id),
+            patient_key: patient.patient_key,
+            full_name: patient.full_name,
+            is_priority: !!patient.is_priority,
+          },
+          queue: await toQueueView(db, updatedQueue),
+        });
+      }
+
+      return c.json({
+        ok: true,
+        action: "QUEUE_EXISTS",
+        patient: {
+          id: String(patient._id),
+          patient_key: patient.patient_key,
+          full_name: patient.full_name,
+          is_priority: !!patient.is_priority,
+        },
+        queue: await toQueueView(db, existingQueue),
+      });
+    }
+
+    const newQueue = await createQueueItem({
+      db,
+      patient,
+      roomId,
+      isPriority: !!patient.is_priority,
+      createdBy: auth.user_id,
+      note: "scan_create_queue",
+    });
+
+    return c.json({
+      ok: true,
+      action: "QUEUE_CREATED",
+      patient: {
+        id: String(patient._id),
+        patient_key: patient.patient_key,
+        full_name: patient.full_name,
+        is_priority: !!patient.is_priority,
+      },
+      queue: await toQueueView(db, newQueue),
+    });
   }
 );
 
@@ -51,119 +173,42 @@ route.put(
   async (c) => {
     const db = getDb();
     const auth = c.get("auth");
-    const queueId = parseQueueId(c.req.param("id"));
-    const queue = await db.collection("queues").findOne({ _id: queueId });
-    if (!queue) return c.json({ ok: false, error: "queue_not_found" }, 404);
+    let queueId;
+    try {
+      queueId = parseQueueId(c.req.param("id"));
+    } catch {
+      return c.json({ ok: false, error: "invalid_queue_id" }, 400);
+    }
+    const queue = await findQueueById(db, queueId);
+    if (!queue) {
+      return c.json({ ok: false, error: "queue_not_found" }, 404);
+    }
 
-    if (auth.role !== "super_admin" && !(auth.allowed_rooms || []).includes(queue.room_id)) {
-      return c.json({ ok: false, error: "forbidden_room_access" }, 403);
+    const accessError = await ensureQueueRoomAccessOrThrow(c, queue);
+    if (accessError) return accessError;
+
+    if (!WAITING_QUEUE_STATUSES.includes(queue.status)) {
+      return c.json({ ok: false, error: "queue_not_in_waiting_state" }, 409);
     }
 
     const existingProcessing = await db.collection("queues").findOne({
       room_id: queue.room_id,
-      status: QUEUE_STATUS.PROCESSING,
+      status: QUEUE_STATUS.DANG_KHAM,
       _id: { $ne: queue._id },
     });
     if (existingProcessing) {
       return c.json({ ok: false, error: "another_patient_processing" }, 409);
     }
 
-    await db.collection("queues").updateOne(
-      { _id: queue._id },
-      {
-        $set: { status: QUEUE_STATUS.PROCESSING, updated_at: new Date() },
-        $push: {
-          logs: {
-            status: QUEUE_STATUS.PROCESSING,
-            time: new Date(),
-            user_id: auth.user_id,
-            note: "called",
-          },
-        },
-      }
-    );
-
-    return c.json({ ok: true, queue_id: String(queue._id), status: QUEUE_STATUS.PROCESSING });
-  }
-);
-
-route.post(
-  "/v1/queue/scan",
-  authMiddleware,
-  requireRole(["super_admin", "admin", "nurse"]),
-  requireRoomAccess("room_id"),
-  async (c) => {
-    const db = getDb();
-    const auth = c.get("auth");
-    const body = c.get("requestBody") || {};
-    const roomId = String(body.room_id || "");
-    const qrContent = String(body.qr_content || "");
-    const match = qrContent.match(/^pfm:\/\/checkin\/([a-fA-F0-9]{24})$/);
-    if (!match) return c.json({ ok: false, error: "invalid_qr_content" }, 400);
-
-    const patientId = new ObjectId(match[1]);
-    const queue = await db.collection("queues").findOne({
-      patient_id: patientId,
-      room_id: roomId,
-      status: { $in: [QUEUE_STATUS.WAITING, QUEUE_STATUS.PROCESSING] },
+    const updated = await updateQueueStatus(db, {
+      queue,
+      status: QUEUE_STATUS.DANG_KHAM,
+      actorUserId: auth.user_id,
+      note: "called_to_exam",
+      eventType: "CALL_PATIENT",
     });
-    if (!queue) return c.json({ ok: false, error: "queue_not_found_for_room" }, 404);
 
-    await db.collection("queues").updateOne(
-      { _id: queue._id },
-      {
-        $set: { status: QUEUE_STATUS.PROCESSING, updated_at: new Date() },
-        $push: {
-          logs: {
-            status: QUEUE_STATUS.PROCESSING,
-            time: new Date(),
-            user_id: auth.user_id,
-            note: "scan_kingpos",
-          },
-        },
-      }
-    );
-
-    const patient = await db.collection("patients").findOne({ _id: patientId });
-    return c.json({
-      ok: true,
-      queue_id: String(queue._id),
-      patient_id: String(patientId),
-      patient_name: patient?.full_name || "",
-      status: QUEUE_STATUS.PROCESSING,
-      room_id: roomId,
-      auto_called: true,
-    });
-  }
-);
-
-route.put(
-  "/v1/queue/:id/skip",
-  authMiddleware,
-  requireRole(["super_admin", "admin", "nurse"]),
-  async (c) => {
-    const db = getDb();
-    const auth = c.get("auth");
-    const body = await c.req.json().catch(() => ({}));
-    const queueId = parseQueueId(c.req.param("id"));
-    const queue = await db.collection("queues").findOne({ _id: queueId });
-    if (!queue) return c.json({ ok: false, error: "queue_not_found" }, 404);
-
-    await db.collection("queues").updateOne(
-      { _id: queue._id },
-      {
-        $set: { status: QUEUE_STATUS.SKIPPED, updated_at: new Date() },
-        $push: {
-          logs: {
-            status: QUEUE_STATUS.SKIPPED,
-            time: new Date(),
-            user_id: auth.user_id,
-            note: body.note || "skipped",
-          },
-        },
-      }
-    );
-    return c.json({ ok: true, status: QUEUE_STATUS.SKIPPED });
+    return c.json({ ok: true, queue: await toQueueView(db, updated) });
   }
 );
 
@@ -175,134 +220,150 @@ route.put(
     const db = getDb();
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => ({}));
-    const queueId = parseQueueId(c.req.param("id"));
-    const queue = await db.collection("queues").findOne({ _id: queueId });
-    if (!queue) return c.json({ ok: false, error: "queue_not_found" }, 404);
-
-    const nextRoomId = body.next_room_id ? String(body.next_room_id) : null;
-    const endVisit = !!body.end_visit;
-    if ((nextRoomId && endVisit) || (!nextRoomId && !endVisit)) {
-      return c.json({ ok: false, error: "must_choose_next_room_or_end_visit" }, 400);
+    let queueId;
+    try {
+      queueId = parseQueueId(c.req.param("id"));
+    } catch {
+      return c.json({ ok: false, error: "invalid_queue_id" }, 400);
+    }
+    const queue = await findQueueById(db, queueId);
+    if (!queue) {
+      return c.json({ ok: false, error: "queue_not_found" }, 404);
     }
 
-    await db.collection("queues").updateOne(
-      { _id: queue._id },
-      {
-        $set: { status: QUEUE_STATUS.COMPLETED, updated_at: new Date() },
-        $push: {
-          logs: {
-            status: QUEUE_STATUS.COMPLETED,
-            time: new Date(),
-            user_id: auth.user_id,
-            note: body.note || "completed",
-          },
-        },
-      }
-    );
+    const accessError = await ensureQueueRoomAccessOrThrow(c, queue);
+    if (accessError) return accessError;
 
-    if (nextRoomId) {
-      await ensureRoomExists(db, nextRoomId);
-      const newQueue = await createQueueItem({
-        db,
-        patientId: queue.patient_id,
-        clinicId: queue.clinic_id,
-        roomId: nextRoomId,
-        isPriority: queue.is_priority,
-        createdBy: auth.user_id,
-        note: "next_room_after_complete",
-      });
-      return c.json({
-        ok: true,
-        status: QUEUE_STATUS.COMPLETED,
-        next_action: "NEXT_ROOM",
-        next_queue_id: String(newQueue._id),
-      });
+    if (queue.status !== QUEUE_STATUS.DANG_KHAM) {
+      return c.json({ ok: false, error: "queue_not_in_exam_state" }, 409);
     }
 
-    return c.json({
-      ok: true,
-      status: QUEUE_STATUS.COMPLETED,
-      next_action: "END_VISIT",
-    });
-  }
-);
-
-route.put(
-  "/v1/queue/:id/transfer",
-  authMiddleware,
-  requireRole(["super_admin", "admin", "nurse"]),
-  async (c) => {
-    const db = getDb();
-    const auth = c.get("auth");
-    const body = await c.req.json().catch(() => ({}));
-    const toRoomId = String(body.to_room_id || "");
-    if (!toRoomId) return c.json({ ok: false, error: "to_room_id_required" }, 400);
-    await ensureRoomExists(db, toRoomId);
-
-    const queueId = parseQueueId(c.req.param("id"));
-    const queue = await db.collection("queues").findOne({ _id: queueId });
-    if (!queue) return c.json({ ok: false, error: "queue_not_found" }, 404);
-
-    await db.collection("queues").updateOne(
-      { _id: queue._id },
-      {
-        $set: { status: QUEUE_STATUS.TRANSFERRED, updated_at: new Date() },
-        $push: {
-          logs: {
-            status: QUEUE_STATUS.TRANSFERRED,
-            time: new Date(),
-            user_id: auth.user_id,
-            note: body.note || "manual_transfer",
-          },
-        },
-      }
-    );
-
-    const newQueue = await createQueueItem({
-      db,
-      patientId: queue.patient_id,
-      clinicId: queue.clinic_id,
-      roomId: toRoomId,
-      isPriority: queue.is_priority,
-      createdBy: auth.user_id,
-      note: "transfer",
+    const updated = await updateQueueStatus(db, {
+      queue,
+      status: QUEUE_STATUS.HOAN_THANH,
+      actorUserId: auth.user_id,
+      note: body.note || "completed",
+      eventType: "COMPLETE_PATIENT",
     });
 
-    return c.json({
-      ok: true,
-      new_queue_id: String(newQueue._id),
-      status: QUEUE_STATUS.WAITING,
-      room_id: toRoomId,
-    });
+    return c.json({ ok: true, queue: await toQueueView(db, updated) });
   }
 );
 
 route.patch(
-  "/v1/queue/reorder",
+  "/v1/queue/:id/status",
+  authMiddleware,
+  async (c) => {
+    const db = getDb();
+    const auth = c.get("auth");
+    const body = await c.req.json().catch(() => ({}));
+    const nextStatus = String(body.status || "").trim();
+    const note = String(body.note || "").trim();
+
+    if (!isValidQueueStatus(nextStatus)) {
+      return c.json({ ok: false, error: "invalid_status" }, 400);
+    }
+
+    let queueId;
+    try {
+      queueId = parseQueueId(c.req.param("id"));
+    } catch {
+      return c.json({ ok: false, error: "invalid_queue_id" }, 400);
+    }
+    const queue = await findQueueById(db, queueId);
+    if (!queue) {
+      return c.json({ ok: false, error: "queue_not_found" }, 404);
+    }
+
+    const accessError = await ensureQueueRoomAccessOrThrow(c, queue);
+    if (accessError) return accessError;
+
+    if (nextStatus === QUEUE_STATUS.DANG_KHAM) {
+      const existingProcessing = await db.collection("queues").findOne({
+        room_id: queue.room_id,
+        status: QUEUE_STATUS.DANG_KHAM,
+        _id: { $ne: queue._id },
+      });
+      if (existingProcessing) {
+        return c.json({ ok: false, error: "another_patient_processing" }, 409);
+      }
+    }
+
+    const updated = await updateQueueStatus(db, {
+      queue,
+      status: nextStatus,
+      actorUserId: auth.user_id,
+      note: note || "manual_status_update",
+      eventType: "STATUS_MANUAL_OVERRIDE",
+      payload: {
+        source: "manual",
+      },
+    });
+
+    return c.json({ ok: true, queue: await toQueueView(db, updated) });
+  }
+);
+
+route.patch(
+  "/v1/queue/:id/position",
   authMiddleware,
   requireRole(["super_admin", "admin", "nurse"]),
   requireRoomAccess("room_id"),
   async (c) => {
     const db = getDb();
     const body = c.get("requestBody") || {};
-    const roomId = String(body.room_id || "");
-    const orderList = Array.isArray(body.order) ? body.order : [];
-    if (!roomId || orderList.length === 0) {
-      return c.json({ ok: false, error: "room_id_and_order_required" }, 400);
+    const roomId = String(body.room_id || "").trim();
+    const targetQueueId = body.target_queue_id ? String(body.target_queue_id).trim() : null;
+    const mode = String(body.mode || "before").trim();
+    const orderedIds = Array.isArray(body.ordered_ids) ? body.ordered_ids : null;
+
+    if (!roomId) {
+      return c.json({ ok: false, error: "room_id_required" }, 400);
     }
 
-    let updated = 0;
-    for (let i = 0; i < orderList.length; i += 1) {
-      const id = orderList[i];
-      if (!ObjectId.isValid(id)) continue;
-      const res = await db.collection("queues").updateOne(
-        { _id: new ObjectId(id), room_id: roomId },
-        { $set: { order: i + 1, updated_at: new Date() } }
-      );
-      updated += res.modifiedCount;
+    let queueId;
+    try {
+      queueId = parseQueueId(c.req.param("id"));
+    } catch {
+      return c.json({ ok: false, error: "invalid_queue_id" }, 400);
+    }
+    const queue = await findQueueById(db, queueId);
+    if (!queue) {
+      return c.json({ ok: false, error: "queue_not_found" }, 404);
     }
 
-    return c.json({ ok: true, updated });
+    const accessError = await ensureQueueRoomAccessOrThrow(c, queue);
+    if (accessError) return accessError;
+
+    try {
+      await moveQueuePosition(db, {
+        queueId,
+        roomId,
+        targetQueueId,
+        mode,
+        orderedIds,
+      });
+    } catch (error) {
+      const message = String(error?.message || "");
+      const statusCode =
+        message === "queue_not_found" ? 404 :
+        message === "queue_room_mismatch" ? 400 :
+        message === "queue_not_movable" ? 409 :
+        message === "queue_not_in_waiting_list" ? 409 :
+        message === "target_queue_not_found" ? 404 :
+        message === "invalid_position_mode" ? 400 :
+        message === "ordered_ids_mismatch" ? 400 :
+        400;
+      return c.json({ ok: false, error: message || "position_update_failed" }, statusCode);
+    }
+
+    const items = [];
+    const docs = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES);
+    for (const doc of docs) {
+      items.push(await toQueueView(db, doc));
+    }
+
+    return c.json({ ok: true, room_id: roomId, items, total: items.length });
   }
 );
 

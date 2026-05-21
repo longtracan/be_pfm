@@ -7,7 +7,6 @@ export function signStaffToken(staffUser) {
     {
       user_id: String(staffUser._id),
       username: staffUser.username,
-      clinic_id: staffUser.clinic_id,
       role: staffUser.role,
       allowed_rooms: staffUser.allowed_rooms || [],
       full_name: staffUser.full_name,
