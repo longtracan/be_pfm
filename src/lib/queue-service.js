@@ -12,7 +12,7 @@ function toObjectId(value) {
   return new ObjectId(value);
 }
 
-function formatDateKey(date = new Date()) {
+export function formatDateKey(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: HO_CHI_MINH_TIMEZONE,
     year: "numeric",
@@ -358,13 +358,12 @@ export async function reindexRoomQueues(db, roomId) {
   return updated;
 }
 
-export async function getRoomQueues(db, roomId, statuses = ACTIVE_QUEUE_STATUSES) {
+export async function getRoomQueues(db, roomId, statuses = ACTIVE_QUEUE_STATUSES, date = null) {
+  const filter = { room_id: roomId, status: { $in: statuses } };
+  if (date) filter.queue_date = date;
   return db
     .collection("queues")
-    .find({
-      room_id: roomId,
-      status: { $in: statuses },
-    })
+    .find(filter)
     .sort({ priority_rank: 1, order_rank: 1, created_at: 1 })
     .toArray();
 }
@@ -498,12 +497,27 @@ export async function sortQueueViewDocs(db, queueDocs) {
 
 export async function toQueueView(db, queueDoc) {
   const patient = await db.collection("patients").findOne({ _id: queueDoc.patient_id });
+
+  // Trích năm sinh từ dob (hỗ trợ format YYYY hoặc DD/MM/YYYY)
+  const rawDob = String(patient?.dob || queueDoc.patient_snapshot?.dob || '').trim();
+  let year_of_birth = '';
+  if (rawDob) {
+    if (/^\d{4}$/.test(rawDob)) {
+      year_of_birth = rawDob;
+    } else {
+      const m = rawDob.match(/(\d{4})$/);
+      if (m) year_of_birth = m[1];
+    }
+  }
+
   return {
     queue_id: String(queueDoc._id),
     queue_number: queueDoc.queue_number,
     patient_id: String(queueDoc.patient_id),
     patient_key: queueDoc.patient_key,
     patient_name: patient?.full_name || queueDoc.patient_snapshot?.full_name || "",
+    gender: patient?.gender || queueDoc.patient_snapshot?.gender || "",
+    year_of_birth,
     status: queueDoc.status,
     room_id: queueDoc.room_id,
     floor_id: queueDoc.floor_id,

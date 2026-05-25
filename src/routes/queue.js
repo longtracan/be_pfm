@@ -12,6 +12,7 @@ import {
   findLatestActiveQueueForPatientRoom,
   findPatientById,
   findQueueById,
+  formatDateKey,
   getRoomQueues,
   moveQueuePosition,
   parsePatientPayload,
@@ -28,9 +29,10 @@ const route = new Hono();
 /** Emit SSE snapshot for a room after any mutation */
 async function broadcastRoom(db, roomId) {
   try {
+    const today = formatDateKey(new Date());
     const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
     const roomName = roomDoc?.room_name || roomId;
-    const docs  = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES);
+    const docs  = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES, today);
     const items = [];
     for (const doc of docs) {
       items.push(await toQueueView(db, doc));
@@ -68,6 +70,7 @@ route.get(
     const db = getDb();
     const roomId = String(c.req.query("room_id") || "").trim();
     const statusRaw = String(c.req.query("status") || "").trim();
+    const dateParam = String(c.req.query("date") || "").trim();
     if (!roomId) {
       return c.json({ ok: false, error: "room_id_required" }, 400);
     }
@@ -78,14 +81,15 @@ route.get(
           .filter((item) => item && isValidQueueStatus(item))
       : ACTIVE_QUEUE_STATUSES;
     const effectiveStatuses = statuses.length > 0 ? statuses : ACTIVE_QUEUE_STATUSES;
+    const date = dateParam || formatDateKey(new Date());
 
-    const docs = await getRoomQueues(db, roomId, effectiveStatuses);
+    const docs = await getRoomQueues(db, roomId, effectiveStatuses, date);
     const items = [];
     for (const doc of docs) {
       items.push(await toQueueView(db, doc));
     }
 
-    return c.json({ ok: true, room_id: roomId, items, total: items.length });
+    return c.json({ ok: true, room_id: roomId, date, items, total: items.length });
   }
 );
 
@@ -224,15 +228,6 @@ route.put(
       return c.json({ ok: false, error: "queue_not_in_waiting_state" }, 409);
     }
 
-    const existingProcessing = await db.collection("queues").findOne({
-      room_id: queue.room_id,
-      status: QUEUE_STATUS.DANG_KHAM,
-      _id: { $ne: queue._id },
-    });
-    if (existingProcessing) {
-      return c.json({ ok: false, error: "another_patient_processing" }, 409);
-    }
-
     const updatedCall = await updateQueueStatus(db, {
       queue,
       status: QUEUE_STATUS.DANG_KHAM,
@@ -314,14 +309,7 @@ route.patch(
     if (accessError) return accessError;
 
     if (nextStatus === QUEUE_STATUS.DANG_KHAM) {
-      const existingProcessing = await db.collection("queues").findOne({
-        room_id: queue.room_id,
-        status: QUEUE_STATUS.DANG_KHAM,
-        _id: { $ne: queue._id },
-      });
-      if (existingProcessing) {
-        return c.json({ ok: false, error: "another_patient_processing" }, 409);
-      }
+      // Cho phép nhiều bệnh nhân khám cùng lúc — không kiểm tra existingProcessing
     }
 
     const updatedStatus = await updateQueueStatus(db, {

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { getDb } from "../lib/mongo.js";
-import { getRoomQueues, toQueueView } from "../lib/queue-service.js";
+import { getRoomQueues, toQueueView, formatDateKey } from "../lib/queue-service.js";
 import { ACTIVE_QUEUE_STATUSES, WAITING_QUEUE_STATUSES } from "../lib/constants.js";
 import queueEvents from "../lib/queue-events.js";
 import { verifyToken } from "../lib/auth.js";
@@ -39,9 +39,10 @@ route.get(
     return streamSSE(c, async (stream) => {
       // Gửi snapshot ngay khi kết nối
       try {
+        const today = formatDateKey(new Date());
         const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
         const roomName = roomDoc?.room_name || roomId;
-        const docs  = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES);
+        const docs  = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES, today);
         const items = [];
         for (const doc of docs) {
           items.push(await toQueueView(db, doc));
@@ -86,23 +87,25 @@ route.get(
 route.get("/v1/events/public", async (c) => {
   const db     = getDb();
   const roomId = String(c.req.query("room_id") || "").trim();
+  const dateParam = String(c.req.query("date") || "").trim();
 
   if (!roomId) {
     return c.json({ ok: false, error: "room_id_required" }, 400);
   }
 
   return streamSSE(c, async (stream) => {
+    const today = dateParam || formatDateKey(new Date());
     // Snapshot ngay khi kết nối
     try {
       const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
       const roomName = roomDoc?.room_name || roomId;
-      const docs  = await getRoomQueues(db, roomId, WAITING_QUEUE_STATUSES);
+      const docs  = await getRoomQueues(db, roomId, WAITING_QUEUE_STATUSES, today);
       const items = [];
       for (const doc of docs) {
         const view = await toQueueView(db, doc);
         items.push(toPublicViewFromView(view));
       }
-      await stream.writeSSE({ event: "snapshot", data: JSON.stringify({ roomId, roomName, items }) });
+      await stream.writeSSE({ event: "snapshot", data: JSON.stringify({ roomId, roomName, items, date: today }) });
     } catch {
       // Continue
     }
@@ -112,7 +115,7 @@ route.get("/v1/events/public", async (c) => {
       const publicItems = allItems
         .filter((x) => WAITING_QUEUE_STATUSES.includes(x.status))
         .map(toPublicViewFromView);
-      stream.writeSSE({ event: "update", data: JSON.stringify({ roomId, roomName: eventRoomName || roomId, items: publicItems }) }).catch(() => {});
+      stream.writeSSE({ event: "update", data: JSON.stringify({ roomId, roomName: eventRoomName || roomId, items: publicItems, date: today }) }).catch(() => {});
     }
 
     queueEvents.on("queue-update", onUpdate);
@@ -135,13 +138,13 @@ route.get("/v1/events/public", async (c) => {
 // Minimal public view — không expose PII nhạy cảm
 function toPublicViewFromView(view) {
   return {
-    queue_id:     view.queue_id,
-    queue_number: view.queue_number,
-    patient_name: view.patient_name ? view.patient_name.split(" ").slice(-1)[0] : "", // chỉ tên (lastName)
-    status:       view.status,
-    room_id:      view.room_id,
-    is_priority:  view.is_priority,
-    order_rank:   view.order_rank,
+    queue_id:      view.queue_id,
+    patient_name:  view.patient_name || "",
+    status:        view.status,
+    is_priority:   view.is_priority,
+    order_rank:    view.order_rank,
+    gender:        view.gender        || "",
+    year_of_birth: view.year_of_birth || "",
   };
 }
 
