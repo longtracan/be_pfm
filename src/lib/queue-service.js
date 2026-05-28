@@ -1,4 +1,3 @@
-import { ObjectId } from "mongodb";
 import {
   ACTIVE_QUEUE_STATUSES,
   QUEUE_STATUS,
@@ -7,9 +6,8 @@ import {
 
 const HO_CHI_MINH_TIMEZONE = "Asia/Ho_Chi_Minh";
 
-function toObjectId(value) {
-  if (value instanceof ObjectId) return value;
-  return new ObjectId(value);
+function isValidUUID(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ""));
 }
 
 export function formatDateKey(date = new Date()) {
@@ -66,7 +64,7 @@ export function parseQrContent(raw) {
   const value = String(raw || "").trim();
   if (!value) return null;
 
-  const uriMatch = value.match(/^pfm:\/\/checkin\/([a-fA-F0-9]{24})$/);
+  const uriMatch = value.match(/^pfm:\/\/checkin\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
   if (uriMatch) {
     return {
       type: "uri",
@@ -93,7 +91,7 @@ export function parseQrContent(raw) {
 
 export function buildPatientQrPayload(patientDoc) {
   return {
-    patient_id: String(patientDoc._id),
+    patient_id: patientDoc.id,
     patient_key: patientDoc.patient_key,
     medical_code: patientDoc.medical_code,
     identity_number: patientDoc.identity_number,
@@ -108,53 +106,55 @@ export function buildPatientQrPayload(patientDoc) {
 }
 
 export async function ensureRoomExists(db, roomId) {
-  const room = await db.collection("rooms").findOne({ room_id: roomId, is_active: true });
-  if (!room) {
-    throw new Error(`room_not_found:${roomId}`);
-  }
+  const room = await db
+    .prepare("SELECT * FROM rooms WHERE room_id = ? AND is_active = 1 LIMIT 1")
+    .bind(roomId)
+    .first();
+  if (!room) throw new Error(`room_not_found:${roomId}`);
   return room;
 }
 
 export async function nextQueueNumber(db, roomId) {
-  const res = await db.collection("counters").findOneAndUpdate(
-    { room_id: roomId, date_key: formatDateKey(), type: "queue_number" },
-    { $inc: { value: 1 }, $setOnInsert: { created_at: new Date() } },
-    { upsert: true, returnDocument: "after" }
-  );
-  return res.value.value;
+  const dateKey = formatDateKey();
+  const batchResults = await db.batch([
+    db.prepare("INSERT OR IGNORE INTO counters (room_id, date_key, value) VALUES (?, ?, 0)").bind(roomId, dateKey),
+    db.prepare("UPDATE counters SET value = value + 1 WHERE room_id = ? AND date_key = ?").bind(roomId, dateKey),
+    db.prepare("SELECT value FROM counters WHERE room_id = ? AND date_key = ?").bind(roomId, dateKey),
+  ]);
+  return batchResults[2].results[0].value;
 }
 
 export async function appendQueueEvent(db, event) {
-  const now = new Date();
-  await db.collection("queue_events").insertOne({
-    event_type: event.event_type || "STATUS_CHANGED",
-    queue_id: event.queue_id ? toObjectId(event.queue_id) : null,
-    room_id: event.room_id || null,
-    from_status: event.from_status || null,
-    to_status: event.to_status || null,
-    actor_user_id: event.actor_user_id || "system",
-    note: event.note || "",
-    payload: event.payload || null,
-    occurred_at: event.occurred_at || now,
-  });
+  const now = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO queue_events (id, event_type, queue_id, room_id, from_status, to_status,
+         actor_user_id, note, payload, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      crypto.randomUUID(),
+      event.event_type || "STATUS_CHANGED",
+      event.queue_id || null,
+      event.room_id || null,
+      event.from_status || null,
+      event.to_status || null,
+      event.actor_user_id || "system",
+      event.note || "",
+      event.payload ? JSON.stringify(event.payload) : null,
+      event.occurred_at || now
+    )
+    .run();
 }
 
 async function nextOrderRank(db, roomId, isPriority) {
   const priorityRank = isPriority ? 0 : 1;
-  const filter = {
-    room_id: roomId,
-    status: { $in: WAITING_QUEUE_STATUSES },
-    priority_rank: priorityRank,
-  };
-  const docs = await db
-    .collection("queues")
-    .find(filter)
-    .sort({ order_rank: 1, created_at: 1 })
-    .toArray();
-
-  if (docs.length === 0) return 1;
-
-  const ranks = docs.map((item) => Number(item.order_rank || 0)).filter((n) => Number.isFinite(n));
+  const ph = WAITING_QUEUE_STATUSES.map(() => "?").join(",");
+  const { results } = await db
+    .prepare(`SELECT order_rank FROM queues WHERE room_id = ? AND status IN (${ph}) AND priority_rank = ? ORDER BY order_rank ASC`)
+    .bind(roomId, ...WAITING_QUEUE_STATUSES, priorityRank)
+    .all();
+  if (results.length === 0) return 1;
+  const ranks = results.map((r) => Number(r.order_rank || 0)).filter((n) => Number.isFinite(n));
   if (ranks.length === 0) return 1;
   return Math.max(...ranks) + 1;
 }
@@ -169,30 +169,36 @@ export async function createQueueItem({
 }) {
   const room = await ensureRoomExists(db, roomId);
   const queueNumber = await nextQueueNumber(db, roomId);
-  const now = new Date();
+  const now = Date.now();
   const priorityRank = isPriority ? 0 : 1;
   const orderRank = await nextOrderRank(db, roomId, isPriority);
+  const queueId = crypto.randomUUID();
 
-  const item = {
-    patient_id: toObjectId(patient._id),
-    patient_key: patient.patient_key,
-    room_id: roomId,
-    floor_id: room.floor_id || null,
-    queue_date: formatDateKey(now),
-    status: QUEUE_STATUS.CHO_KHAM,
-    queue_number: queueNumber,
-    is_priority: !!isPriority,
-    priority_rank: priorityRank,
-    order_rank: orderRank,
-    arrived_at: now,
-    called_at: null,
-    completed_at: null,
-    created_at: now,
-    updated_at: now,
-  };
-
-  const inserted = await db.collection("queues").insertOne(item);
-  const queueId = inserted.insertedId;
+  await db
+    .prepare(
+      `INSERT INTO queues
+        (id, patient_id, patient_key, room_id, floor_id, queue_date, status,
+         queue_number, is_priority, priority_rank, order_rank,
+         arrived_at, called_at, completed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`
+    )
+    .bind(
+      queueId,
+      patient.id,
+      patient.patient_key,
+      roomId,
+      room.floor_id || null,
+      formatDateKey(),
+      QUEUE_STATUS.CHO_KHAM,
+      queueNumber,
+      isPriority ? 1 : 0,
+      priorityRank,
+      orderRank,
+      now,
+      now,
+      now
+    )
+    .run();
 
   await appendQueueEvent(db, {
     event_type: "QUEUE_CREATED",
@@ -202,95 +208,103 @@ export async function createQueueItem({
     to_status: QUEUE_STATUS.CHO_KHAM,
     actor_user_id: createdBy || "system",
     note: note || "created",
-    payload: {
-      queue_number: queueNumber,
-      is_priority: !!isPriority,
-    },
+    payload: { queue_number: queueNumber, is_priority: !!isPriority },
   });
 
-  return { ...item, _id: queueId };
+  return {
+    id: queueId,
+    patient_id: patient.id,
+    patient_key: patient.patient_key,
+    room_id: roomId,
+    floor_id: room.floor_id || null,
+    queue_date: formatDateKey(),
+    status: QUEUE_STATUS.CHO_KHAM,
+    queue_number: queueNumber,
+    is_priority: isPriority ? 1 : 0,
+    priority_rank: priorityRank,
+    order_rank: orderRank,
+    arrived_at: now,
+    created_at: now,
+    updated_at: now,
+  };
 }
 
 export async function findQueueById(db, queueId) {
-  if (!ObjectId.isValid(String(queueId))) {
-    throw new Error("invalid_queue_id");
-  }
-  return db.collection("queues").findOne({ _id: toObjectId(queueId) });
+  if (!isValidUUID(queueId)) throw new Error("invalid_queue_id");
+  return db.prepare("SELECT * FROM queues WHERE id = ? LIMIT 1").bind(queueId).first();
 }
 
 export async function findLatestActiveQueueForPatientRoom(db, patientId, roomId) {
+  const ph = ACTIVE_QUEUE_STATUSES.map(() => "?").join(",");
   return db
-    .collection("queues")
-    .find({
-      patient_id: toObjectId(patientId),
-      room_id: roomId,
-      status: { $in: ACTIVE_QUEUE_STATUSES },
-    })
-    .sort({ created_at: -1, order_rank: -1 })
-    .limit(1)
-    .next();
+    .prepare(`SELECT * FROM queues WHERE patient_id = ? AND room_id = ? AND status IN (${ph}) ORDER BY created_at DESC, order_rank DESC LIMIT 1`)
+    .bind(patientId, roomId, ...ACTIVE_QUEUE_STATUSES)
+    .first();
 }
 
 export async function findPatientById(db, patientId) {
-  if (!ObjectId.isValid(String(patientId))) {
-    return null;
-  }
-  return db.collection("patients").findOne({ _id: toObjectId(patientId) });
+  if (!isValidUUID(patientId)) return null;
+  return db.prepare("SELECT * FROM patients WHERE id = ? LIMIT 1").bind(patientId).first();
 }
 
 export async function findPatientByKey(db, patientKey) {
   const key = String(patientKey || "").trim();
-  if (!key) {
-    return null;
-  }
-  return db.collection("patients").findOne({ patient_key: key });
+  if (!key) return null;
+  return db.prepare("SELECT * FROM patients WHERE patient_key = ? LIMIT 1").bind(key).first();
 }
 
 export async function upsertPatient(db, patientData) {
-  const now = new Date();
+  const now = Date.now();
   const medicalCode = String(patientData.medical_code || "").trim();
   const identityNumber = String(patientData.identity_number || "").trim();
   const patientKey = String(patientData.patient_key || "").trim();
 
-  if (!medicalCode || !identityNumber || !patientKey) {
-    throw new Error("patient_key_required");
-  }
+  if (!medicalCode || !identityNumber || !patientKey) throw new Error("patient_key_required");
 
-  const payload = {
-    patient_key: patientKey,
-    medical_code: medicalCode,
-    identity_number: identityNumber,
-    full_name: String(patientData.full_name || "").trim(),
-    dob: String(patientData.dob || "").trim(),
-    gender: String(patientData.gender || "").trim(),
-    address: String(patientData.address || "").trim(),
-    address_cv30: String(patientData.address_cv30 || "").trim(),
-    is_priority: !!patientData.is_priority,
-    is_online_booking: !!patientData.is_online_booking,
-    updated_at: now,
-  };
+  const sourcePayloadJson = patientData.source_payload
+    ? JSON.stringify(patientData.source_payload)
+    : null;
 
-  const existing = await db.collection("patients").findOne({ patient_key: patientKey });
-  if (existing) {
-    if (patientData.source_payload !== undefined) {
-      payload.source_payload = patientData.source_payload || null;
-    } else if (existing.source_payload !== undefined) {
-      payload.source_payload = existing.source_payload;
-    }
-    await db.collection("patients").updateOne({ _id: existing._id }, { $set: payload });
-    return { ...existing, ...payload };
-  }
+  const id = crypto.randomUUID();
+  await db
+    .prepare(
+      `INSERT INTO patients
+        (id, patient_key, medical_code, identity_number, full_name, dob, gender,
+         address, address_cv30, is_priority, is_online_booking, source_payload,
+         created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(patient_key) DO UPDATE SET
+         medical_code      = excluded.medical_code,
+         identity_number   = excluded.identity_number,
+         full_name         = excluded.full_name,
+         dob               = excluded.dob,
+         gender            = excluded.gender,
+         address           = excluded.address,
+         address_cv30      = excluded.address_cv30,
+         is_priority       = excluded.is_priority,
+         is_online_booking = excluded.is_online_booking,
+         source_payload    = COALESCE(excluded.source_payload, patients.source_payload),
+         updated_at        = excluded.updated_at`
+    )
+    .bind(
+      id,
+      patientKey,
+      medicalCode,
+      identityNumber,
+      String(patientData.full_name || "").trim(),
+      String(patientData.dob || "").trim(),
+      String(patientData.gender || "").trim(),
+      String(patientData.address || "").trim(),
+      String(patientData.address_cv30 || "").trim(),
+      patientData.is_priority ? 1 : 0,
+      patientData.is_online_booking ? 1 : 0,
+      sourcePayloadJson,
+      now,
+      now
+    )
+    .run();
 
-  const inserted = await db.collection("patients").insertOne({
-    ...payload,
-    source_payload: patientData.source_payload || null,
-    created_at: now,
-  });
-  return {
-    _id: inserted.insertedId,
-    ...payload,
-    created_at: now,
-  };
+  return db.prepare("SELECT * FROM patients WHERE patient_key = ? LIMIT 1").bind(patientKey).first();
 }
 
 export async function updateQueueStatus(db, {
@@ -301,27 +315,27 @@ export async function updateQueueStatus(db, {
   eventType = "STATUS_CHANGED",
   payload = null,
 }) {
-  const now = new Date();
-  const update = {
-    status,
-    updated_at: now,
-  };
+  const now = Date.now();
+  let calledAt = null;
+  let completedAt = null;
 
-  if (status === QUEUE_STATUS.DANG_KHAM) {
-    update.called_at = now;
-  }
-  if (status === QUEUE_STATUS.HOAN_THANH) {
-    update.completed_at = now;
-  }
+  if (status === QUEUE_STATUS.DANG_KHAM) calledAt = now;
+  if (status === QUEUE_STATUS.HOAN_THANH) completedAt = now;
 
-  await db.collection("queues").updateOne(
-    { _id: queue._id },
-    { $set: update }
-  );
+  await db
+    .prepare(
+      `UPDATE queues SET status = ?,
+        called_at    = CASE WHEN ? IS NOT NULL THEN ? ELSE called_at END,
+        completed_at = CASE WHEN ? IS NOT NULL THEN ? ELSE completed_at END,
+        updated_at   = ?
+       WHERE id = ?`
+    )
+    .bind(status, calledAt, calledAt, completedAt, completedAt, now, queue.id)
+    .run();
 
   await appendQueueEvent(db, {
     event_type: eventType,
-    queue_id: queue._id,
+    queue_id: queue.id,
     room_id: queue.room_id,
     from_status: queue.status,
     to_status: status,
@@ -332,40 +346,44 @@ export async function updateQueueStatus(db, {
 
   return {
     ...queue,
-    ...update,
+    status,
+    updated_at: now,
+    ...(calledAt !== null ? { called_at: calledAt } : {}),
+    ...(completedAt !== null ? { completed_at: completedAt } : {}),
   };
 }
 
 export async function reindexRoomQueues(db, roomId) {
-  const docs = await db
-    .collection("queues")
-    .find({
-      room_id: roomId,
-      status: { $in: WAITING_QUEUE_STATUSES },
-    })
-    .sort({ priority_rank: 1, order_rank: 1, created_at: 1 })
-    .toArray();
+  const ph = WAITING_QUEUE_STATUSES.map(() => "?").join(",");
+  const { results: docs } = await db
+    .prepare(`SELECT id FROM queues WHERE room_id = ? AND status IN (${ph}) ORDER BY priority_rank ASC, order_rank ASC, created_at ASC`)
+    .bind(roomId, ...WAITING_QUEUE_STATUSES)
+    .all();
 
-  let updated = 0;
-  for (let i = 0; i < docs.length; i += 1) {
-    const queue = docs[i];
-    const res = await db.collection("queues").updateOne(
-      { _id: queue._id },
-      { $set: { order_rank: i + 1, updated_at: new Date() } }
-    );
-    updated += res.modifiedCount;
-  }
-  return updated;
+  const now = Date.now();
+  const updates = docs.map((q, i) =>
+    db.prepare("UPDATE queues SET order_rank = ?, updated_at = ? WHERE id = ?").bind(i + 1, now, q.id)
+  );
+  if (updates.length > 0) await db.batch(updates);
+  return updates.length;
 }
 
 export async function getRoomQueues(db, roomId, statuses = ACTIVE_QUEUE_STATUSES, date = null) {
-  const filter = { room_id: roomId, status: { $in: statuses } };
-  if (date) filter.queue_date = date;
-  return db
-    .collection("queues")
-    .find(filter)
-    .sort({ priority_rank: 1, order_rank: 1, created_at: 1 })
-    .toArray();
+  let sql = `SELECT * FROM queues WHERE room_id = ?`;
+  const bindings = [roomId];
+
+  const ph = statuses.map(() => "?").join(",");
+  sql += ` AND status IN (${ph})`;
+  bindings.push(...statuses);
+
+  if (date) {
+    sql += " AND queue_date = ?";
+    bindings.push(date);
+  }
+
+  sql += " ORDER BY priority_rank ASC, order_rank ASC, created_at ASC";
+  const { results } = await db.prepare(sql).bind(...bindings).all();
+  return results;
 }
 
 export async function moveQueuePosition(db, {
@@ -375,87 +393,51 @@ export async function moveQueuePosition(db, {
   mode = "before",
   orderedIds = null,
 }) {
-  const current = await db.collection("queues").findOne({ _id: toObjectId(queueId) });
-  if (!current) {
-    throw new Error("queue_not_found");
-  }
+  const current = await db.prepare("SELECT * FROM queues WHERE id = ? LIMIT 1").bind(queueId).first();
+  if (!current) throw new Error("queue_not_found");
+  if (current.room_id !== roomId) throw new Error("queue_room_mismatch");
+  if (!WAITING_QUEUE_STATUSES.includes(current.status)) throw new Error("queue_not_movable");
 
-  if (String(current.room_id) !== String(roomId)) {
-    throw new Error("queue_room_mismatch");
-  }
+  const ph = WAITING_QUEUE_STATUSES.map(() => "?").join(",");
+  const { results: docs } = await db
+    .prepare(`SELECT * FROM queues WHERE room_id = ? AND status IN (${ph}) ORDER BY priority_rank ASC, order_rank ASC, created_at ASC`)
+    .bind(roomId, ...WAITING_QUEUE_STATUSES)
+    .all();
 
-  if (!WAITING_QUEUE_STATUSES.includes(current.status)) {
-    throw new Error("queue_not_movable");
-  }
-
-  const docs = await db
-    .collection("queues")
-    .find({
-      room_id: roomId,
-      status: { $in: WAITING_QUEUE_STATUSES },
-    })
-    .sort({ priority_rank: 1, order_rank: 1, created_at: 1 })
-    .toArray();
-
-  const currentIndex = docs.findIndex((item) => String(item._id) === String(current._id));
-  if (currentIndex < 0) {
-    throw new Error("queue_not_in_waiting_list");
-  }
+  const currentIndex = docs.findIndex((item) => item.id === current.id);
+  if (currentIndex < 0) throw new Error("queue_not_in_waiting_list");
 
   if (Array.isArray(orderedIds) && orderedIds.length > 0) {
     const requestedIds = orderedIds.map((item) => String(item)).filter(Boolean);
-    const currentIds = docs.map((item) => String(item._id));
+    const currentIds = docs.map((item) => item.id);
+    if (requestedIds.length !== docs.length) throw new Error("ordered_ids_mismatch");
     const requestedSet = new Set(requestedIds);
     const currentSet = new Set(currentIds);
-
-    if (requestedIds.length !== docs.length) {
-      throw new Error("ordered_ids_mismatch");
-    }
-
     for (const id of currentIds) {
-      if (!requestedSet.has(id)) {
-        throw new Error("ordered_ids_mismatch");
-      }
+      if (!requestedSet.has(id)) throw new Error("ordered_ids_mismatch");
     }
-
     for (const id of requestedIds) {
-      if (!currentSet.has(id)) {
-        throw new Error("ordered_ids_mismatch");
-      }
+      if (!currentSet.has(id)) throw new Error("ordered_ids_mismatch");
     }
-
-    const orderedDocs = requestedIds.map((id) => docs.find((item) => String(item._id) === id));
-    let updated = 0;
-    for (let i = 0; i < orderedDocs.length; i += 1) {
-      const queue = orderedDocs[i];
-      const res = await db.collection("queues").updateOne(
-        { _id: queue._id },
-        { $set: { order_rank: i + 1, updated_at: new Date() } }
-      );
-      updated += res.modifiedCount;
-    }
-
-    return { updated, ordered_ids: requestedIds };
+    const now = Date.now();
+    const updates = requestedIds.map((id, i) =>
+      db.prepare("UPDATE queues SET order_rank = ?, updated_at = ? WHERE id = ?").bind(i + 1, now, id)
+    );
+    await db.batch(updates);
+    return { updated: updates.length, ordered_ids: requestedIds };
   }
 
-  if (targetQueueId && String(targetQueueId) === String(current._id)) {
-    return { updated: 0, ordered_ids: docs.map((item) => String(item._id)) };
+  if (targetQueueId && targetQueueId === current.id) {
+    return { updated: 0, ordered_ids: docs.map((item) => item.id) };
   }
 
-  let nextIndex = currentIndex;
   if (targetQueueId) {
-    if (!["before", "after"].includes(mode)) {
-      throw new Error("invalid_position_mode");
-    }
-    const targetIndex = docs.findIndex((item) => String(item._id) === String(targetQueueId));
-    if (targetIndex < 0) {
-      throw new Error("target_queue_not_found");
-    }
+    if (!["before", "after"].includes(mode)) throw new Error("invalid_position_mode");
+    const targetIndex = docs.findIndex((item) => item.id === targetQueueId);
+    if (targetIndex < 0) throw new Error("target_queue_not_found");
     docs.splice(currentIndex, 1);
-    nextIndex = docs.findIndex((item) => String(item._id) === String(targetQueueId));
-    if (nextIndex < 0) {
-      throw new Error("target_queue_not_found");
-    }
+    const nextIndex = docs.findIndex((item) => item.id === targetQueueId);
+    if (nextIndex < 0) throw new Error("target_queue_not_found");
     const insertAt = mode === "after" ? nextIndex + 1 : nextIndex;
     docs.splice(insertAt, 0, current);
   } else if (mode === "top") {
@@ -468,17 +450,12 @@ export async function moveQueuePosition(db, {
     throw new Error("invalid_position_mode");
   }
 
-  let updated = 0;
-  for (let i = 0; i < docs.length; i += 1) {
-    const queue = docs[i];
-    const res = await db.collection("queues").updateOne(
-      { _id: queue._id },
-      { $set: { order_rank: i + 1, updated_at: new Date() } }
-    );
-    updated += res.modifiedCount;
-  }
-
-  return { updated, ordered_ids: docs.map((item) => String(item._id)) };
+  const now = Date.now();
+  const updates = docs.map((q, i) =>
+    db.prepare("UPDATE queues SET order_rank = ?, updated_at = ? WHERE id = ?").bind(i + 1, now, q.id)
+  );
+  await db.batch(updates);
+  return { updated: updates.length, ordered_ids: docs.map((item) => item.id) };
 }
 
 export async function sortQueueViewDocs(db, queueDocs) {
@@ -489,18 +466,18 @@ export async function sortQueueViewDocs(db, queueDocs) {
   return items.sort((a, b) => {
     if (a.priority_rank !== b.priority_rank) return a.priority_rank - b.priority_rank;
     if (a.order_rank !== b.order_rank) return a.order_rank - b.order_rank;
-    const aTime = new Date(a.created_at || 0).getTime();
-    const bTime = new Date(b.created_at || 0).getTime();
-    return aTime - bTime;
+    return (a.created_at || 0) - (b.created_at || 0);
   });
 }
 
 export async function toQueueView(db, queueDoc) {
-  const patient = await db.collection("patients").findOne({ _id: queueDoc.patient_id });
+  const patient = await db
+    .prepare("SELECT * FROM patients WHERE id = ? LIMIT 1")
+    .bind(queueDoc.patient_id)
+    .first();
 
-  // Trích năm sinh từ dob (hỗ trợ format YYYY hoặc DD/MM/YYYY)
-  const rawDob = String(patient?.dob || queueDoc.patient_snapshot?.dob || '').trim();
-  let year_of_birth = '';
+  const rawDob = String(patient?.dob || "").trim();
+  let year_of_birth = "";
   if (rawDob) {
     if (/^\d{4}$/.test(rawDob)) {
       year_of_birth = rawDob;
@@ -511,12 +488,12 @@ export async function toQueueView(db, queueDoc) {
   }
 
   return {
-    queue_id: String(queueDoc._id),
+    queue_id: queueDoc.id,
     queue_number: queueDoc.queue_number,
-    patient_id: String(queueDoc.patient_id),
+    patient_id: queueDoc.patient_id,
     patient_key: queueDoc.patient_key,
-    patient_name: patient?.full_name || queueDoc.patient_snapshot?.full_name || "",
-    gender: patient?.gender || queueDoc.patient_snapshot?.gender || "",
+    patient_name: patient?.full_name || "",
+    gender: patient?.gender || "",
     year_of_birth,
     status: queueDoc.status,
     room_id: queueDoc.room_id,
@@ -533,6 +510,6 @@ export async function toQueueView(db, queueDoc) {
 }
 
 export function parseQueueId(id) {
-  if (!ObjectId.isValid(String(id))) throw new Error("invalid_queue_id");
-  return toObjectId(id);
+  if (!isValidUUID(String(id || ""))) throw new Error("invalid_queue_id");
+  return id;
 }

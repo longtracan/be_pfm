@@ -1,20 +1,40 @@
-import { EventEmitter } from "events";
-
 /**
- * Singleton EventEmitter cho SSE queue updates.
- * Mỗi khi có thay đổi queue trong một room, gọi emitQueueUpdate(roomId, items).
+ * Queue events — broadcasts via Durable Object ROOM_HUB.
+ * Broadcasts to both admin hub (roomId) and public hub (public:roomId).
  */
-const queueEvents = new EventEmitter();
-queueEvents.setMaxListeners(200); // hỗ trợ nhiều SSE clients đồng thời
 
 /**
- * Phát event "queue-update" cho một room cụ thể.
+ * @param {object} env - CF Workers env bindings
  * @param {string} roomId
- * @param {string} roomName — tên phòng tiếng Việt
- * @param {object[]} items — kết quả toQueueView[] đã serialized
+ * @param {string} roomName
+ * @param {object[]} items - toQueueView[] results (admin full view)
  */
-export function emitQueueUpdate(roomId, roomName, items) {
-  queueEvents.emit("queue-update", { roomId, roomName: roomName || roomId, items });
-}
+export async function emitQueueUpdate(env, roomId, roomName, items) {
+  const payload = JSON.stringify({ roomId, roomName: roomName || roomId, items });
 
-export default queueEvents;
+  // Broadcast to admin hub
+  try {
+    const id = env.ROOM_HUB.idFromName(roomId);
+    const stub = env.ROOM_HUB.get(id);
+    await stub.fetch("https://internal/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+  } catch {
+    // best-effort
+  }
+
+  // Broadcast to public hub (same payload — public screen filters on its end)
+  try {
+    const pubId = env.ROOM_HUB.idFromName(`public:${roomId}`);
+    const pubStub = env.ROOM_HUB.get(pubId);
+    await pubStub.fetch("https://internal/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+    });
+  } catch {
+    // best-effort: public hub may have no listeners
+  }
+}

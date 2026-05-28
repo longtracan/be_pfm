@@ -13,10 +13,10 @@ export async function authMiddleware(c, next) {
   const token = header.slice("Bearer ".length).trim();
 
   try {
-    const payload = verifyToken(token);
+    const payload = await verifyToken(token, c.env);
     c.set("auth", payload);
     await next();
-  } catch (error) {
+  } catch {
     return c.json({ ok: false, error: "invalid_or_expired_token" }, 401);
   }
 }

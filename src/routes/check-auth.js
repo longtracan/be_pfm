@@ -1,12 +1,14 @@
 import { Hono } from "hono";
 import { authMiddleware } from "../middleware/auth.js";
-import { pingDb } from "../lib/mongo.js";
+import { getDb } from "../lib/db.js";
 
 const route = new Hono();
 
 route.get("/check-auth", authMiddleware, async (c) => {
   const auth = c.get("auth");
-  await pingDb();
+  // Quick D1 ping to verify DB is reachable
+  const db = getDb(c.env);
+  await db.prepare("SELECT 1").first();
 
   return c.json({
     ok: true,
@@ -16,3 +18,4 @@ route.get("/check-auth", authMiddleware, async (c) => {
 });
 
 export default route;
+

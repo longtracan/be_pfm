@@ -1,0 +1,20 @@
+name = "pfm-backend"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+NODE_ENV = "production"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pfm_dts"
+database_id = "REPLACE_AFTER_CREATE"
+migrations_dir = "migrations"
+
+[durable_objects]
+bindings = [{ name = "ROOM_HUB", class_name = "RoomHub" }]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["RoomHub"]

@@ -1,19 +1,29 @@
 import { Hono } from "hono";
-import { ObjectId } from "mongodb";
 import { authMiddleware, requireRole } from "../middleware/auth.js";
-import { getDb } from "../lib/mongo.js";
+import { getDb } from "../lib/db.js";
 import {
   buildPatientQrPayload,
   parsePatientPayload,
   upsertPatient,
+  findPatientById,
 } from "../lib/queue-service.js";
 
 const route = new Hono();
 
+// CF Workers has no `Buffer` — use TextEncoder + btoa for base64
+function toBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = "";
+  bytes.forEach((b) => (binary += String.fromCharCode(b)));
+  return btoa(binary);
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function serializePatient(patient) {
   if (!patient) return null;
   return {
-    id: String(patient._id),
+    id: patient.id,
     patient_key: patient.patient_key,
     medical_code: patient.medical_code,
     identity_number: patient.identity_number,
@@ -34,7 +44,7 @@ route.post(
   authMiddleware,
   requireRole(["super_admin", "admin", "receptionist", "nurse"]),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const body = await c.req.json().catch(() => ({}));
     const parsed = parsePatientPayload(body);
 
@@ -53,20 +63,20 @@ route.post(
       ok: true,
       patient: serializePatient(patient),
       qr_content: qrContent,
-      qr_base64: `data:text/plain;base64,${Buffer.from(qrContent).toString("base64")}`,
-      qr_uri: `pfm://checkin/${String(patient._id)}`,
+      qr_base64: `data:text/plain;base64,${toBase64(qrContent)}`,
+      qr_uri: `pfm://checkin/${patient.id}`,
     });
   }
 );
 
 route.get("/v1/patients/:id", authMiddleware, async (c) => {
-  const db = getDb();
+  const db = getDb(c.env);
   const id = c.req.param("id");
-  if (!ObjectId.isValid(id)) {
+  if (!UUID_RE.test(id)) {
     return c.json({ ok: false, error: "invalid_patient_id" }, 400);
   }
 
-  const patient = await db.collection("patients").findOne({ _id: new ObjectId(id) });
+  const patient = await findPatientById(db, id);
   if (!patient) {
     return c.json({ ok: false, error: "patient_not_found" }, 404);
   }
@@ -75,13 +85,13 @@ route.get("/v1/patients/:id", authMiddleware, async (c) => {
 });
 
 route.get("/v1/patients/:id/qr", authMiddleware, async (c) => {
-  const db = getDb();
+  const db = getDb(c.env);
   const id = c.req.param("id");
-  if (!ObjectId.isValid(id)) {
+  if (!UUID_RE.test(id)) {
     return c.json({ ok: false, error: "invalid_patient_id" }, 400);
   }
 
-  const patient = await db.collection("patients").findOne({ _id: new ObjectId(id) });
+  const patient = await findPatientById(db, id);
   if (!patient) {
     return c.json({ ok: false, error: "patient_not_found" }, 404);
   }
@@ -93,8 +103,8 @@ route.get("/v1/patients/:id/qr", authMiddleware, async (c) => {
     ok: true,
     patient: serializePatient(patient),
     qr_content: qrContent,
-    qr_base64: `data:text/plain;base64,${Buffer.from(qrContent).toString("base64")}`,
-    qr_uri: `pfm://checkin/${String(patient._id)}`,
+    qr_base64: `data:text/plain;base64,${toBase64(qrContent)}`,
+    qr_uri: `pfm://checkin/${patient.id}`,
   });
 });
 

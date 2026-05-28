@@ -5,7 +5,7 @@ import {
   WAITING_QUEUE_STATUSES,
 } from "../lib/constants.js";
 import { authMiddleware, requireRole, requireRoomAccess } from "../middleware/auth.js";
-import { getDb } from "../lib/mongo.js";
+import { getDb } from "../lib/db.js";
 import {
   createQueueItem,
   ensureRoomExists,
@@ -26,18 +26,17 @@ import { emitQueueUpdate } from "../lib/queue-events.js";
 
 const route = new Hono();
 
-/** Emit SSE snapshot for a room after any mutation */
-async function broadcastRoom(db, roomId) {
+/** Broadcast WebSocket snapshot for a room after any mutation */
+async function broadcastRoom(env, roomId) {
   try {
-    const today = formatDateKey(new Date());
-    const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
+    const db = getDb(env);
+    const today = formatDateKey();
+    const roomDoc = await db.prepare("SELECT room_name FROM rooms WHERE room_id = ? LIMIT 1").bind(roomId).first();
     const roomName = roomDoc?.room_name || roomId;
     const docs  = await getRoomQueues(db, roomId, ACTIVE_QUEUE_STATUSES, today);
     const items = [];
-    for (const doc of docs) {
-      items.push(await toQueueView(db, doc));
-    }
-    emitQueueUpdate(roomId, roomName, items);
+    for (const doc of docs) items.push(await toQueueView(db, doc));
+    await emitQueueUpdate(env, roomId, roomName, items);
   } catch {
     // best-effort — never crash the response
   }
@@ -67,7 +66,7 @@ route.get(
   requireRole(["super_admin", "admin", "nurse", "receptionist"]),
   requireRoomAccess("room_id"),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const roomId = String(c.req.query("room_id") || "").trim();
     const statusRaw = String(c.req.query("status") || "").trim();
     const dateParam = String(c.req.query("date") || "").trim();
@@ -81,7 +80,7 @@ route.get(
           .filter((item) => item && isValidQueueStatus(item))
       : ACTIVE_QUEUE_STATUSES;
     const effectiveStatuses = statuses.length > 0 ? statuses : ACTIVE_QUEUE_STATUSES;
-    const date = dateParam || formatDateKey(new Date());
+    const date = dateParam || formatDateKey();
 
     const docs = await getRoomQueues(db, roomId, effectiveStatuses, date);
     const items = [];
@@ -99,7 +98,7 @@ route.post(
   requireRole(["super_admin", "admin", "nurse", "receptionist"]),
   requireRoomAccess("room_id"),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const auth = c.get("auth");
     const body = c.get("requestBody") || {};
     const roomId = String(body.room_id || "").trim();
@@ -139,7 +138,7 @@ route.post(
       throw err;
     }
 
-    const existingQueue = await findLatestActiveQueueForPatientRoom(db, patient._id, roomId);
+    const existingQueue = await findLatestActiveQueueForPatientRoom(db, patient.id, roomId);
     if (existingQueue) {
       if (existingQueue.status === QUEUE_STATUS.CHO_KET_QUA) {
         const updatedQueue = await updateQueueStatus(db, {
@@ -150,12 +149,12 @@ route.post(
           eventType: "AUTO_RETURN_FOR_RESULT",
         });
 
-        broadcastRoom(db, existingQueue.room_id);
+        await broadcastRoom(c.env, existingQueue.room_id);
         return c.json({
           ok: true,
           action: "AUTO_CHO_TAI_KHAM",
           patient: {
-            id: String(patient._id),
+            id: patient.id,
             patient_key: patient.patient_key,
             full_name: patient.full_name,
             is_priority: !!patient.is_priority,
@@ -168,7 +167,7 @@ route.post(
         ok: true,
         action: "QUEUE_EXISTS",
         patient: {
-          id: String(patient._id),
+          id: patient.id,
           patient_key: patient.patient_key,
           full_name: patient.full_name,
           is_priority: !!patient.is_priority,
@@ -187,13 +186,13 @@ route.post(
     });
 
     // Broadcast after new queue created
-    broadcastRoom(db, roomId);
+    await broadcastRoom(c.env, roomId);
 
     return c.json({
       ok: true,
       action: "QUEUE_CREATED",
       patient: {
-        id: String(patient._id),
+        id: patient.id,
         patient_key: patient.patient_key,
         full_name: patient.full_name,
         is_priority: !!patient.is_priority,
@@ -208,7 +207,7 @@ route.put(
   authMiddleware,
   requireRole(["super_admin", "admin", "nurse"]),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const auth = c.get("auth");
     let queueId;
     try {
@@ -236,7 +235,7 @@ route.put(
       eventType: "CALL_PATIENT",
     });
 
-    broadcastRoom(db, queue.room_id);
+    await broadcastRoom(c.env, queue.room_id);
     return c.json({ ok: true, queue: await toQueueView(db, updatedCall) });
   }
 );
@@ -246,7 +245,7 @@ route.put(
   authMiddleware,
   requireRole(["super_admin", "admin", "nurse"]),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => ({}));
     let queueId;
@@ -275,7 +274,7 @@ route.put(
       eventType: "COMPLETE_PATIENT",
     });
 
-    broadcastRoom(db, queue.room_id);
+    await broadcastRoom(c.env, queue.room_id);
     return c.json({ ok: true, queue: await toQueueView(db, updatedComplete) });
   }
 );
@@ -284,7 +283,7 @@ route.patch(
   "/v1/queue/:id/status",
   authMiddleware,
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => ({}));
     const nextStatus = String(body.status || "").trim();
@@ -321,7 +320,7 @@ route.patch(
       payload: { source: "manual" },
     });
 
-    broadcastRoom(db, queue.room_id);
+    await broadcastRoom(c.env, queue.room_id);
     return c.json({ ok: true, queue: await toQueueView(db, updatedStatus) });
   }
 );
@@ -332,7 +331,7 @@ route.patch(
   requireRole(["super_admin", "admin", "nurse"]),
   requireRoomAccess("room_id"),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const body = c.get("requestBody") || {};
     const roomId = String(body.room_id || "").trim();
     const targetQueueId = body.target_queue_id ? String(body.target_queue_id).trim() : null;
@@ -385,8 +384,7 @@ route.patch(
       items.push(await toQueueView(db, doc));
     }
 
-    const roomDoc = await db.collection("rooms").findOne({ room_id: roomId });
-    emitQueueUpdate(roomId, roomDoc?.room_name || roomId, items);
+    await broadcastRoom(c.env, roomId);
     return c.json({ ok: true, room_id: roomId, items, total: items.length });
   }
 );
@@ -397,7 +395,7 @@ route.put(
   authMiddleware,
   requireRole(["super_admin", "admin", "nurse"]),
   async (c) => {
-    const db = getDb();
+    const db = getDb(c.env);
     const auth = c.get("auth");
     const body = await c.req.json().catch(() => ({}));
     let queueId;
@@ -419,7 +417,7 @@ route.put(
       eventType: "SKIP_PATIENT",
     });
 
-    broadcastRoom(db, queue.room_id);
+    await broadcastRoom(c.env, queue.room_id);
     return c.json({ ok: true, queue: await toQueueView(db, updatedSkip) });
   }
 );
