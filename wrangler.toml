@@ -9,7 +9,7 @@ NODE_ENV = "production"
 [[d1_databases]]
 binding = "DB"
 database_name = "pfm_dts"
-database_id = "REPLACE_AFTER_CREATE"
+database_id = "6a2aa7a2-07f3-4739-98f6-7746cf92fa5c"
 migrations_dir = "migrations"
 
 [durable_objects]
@@ -17,4 +17,4 @@ bindings = [{ name = "ROOM_HUB", class_name = "RoomHub" }]
 
 [[migrations]]
 tag = "v1"
-new_classes = ["RoomHub"]
+new_sqlite_classes = ["RoomHub"]
