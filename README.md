@@ -36,6 +36,17 @@ npm run dev
 
 Server runs at `http://localhost:3000`.
 
+## CI/CD (Cloudflare Worker)
+
+Repo backend co workflow tu dong deploy tai `.github/workflows/cloudflare-worker-deploy.yml`.
+
+Can cau hinh GitHub secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Sau khi push len `main`/`master`, GitHub Actions se chay `wrangler deploy`.
+
 ## Test routes
 
 ### 1. Check DB (no auth)
