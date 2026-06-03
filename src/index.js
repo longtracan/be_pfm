@@ -14,14 +14,24 @@ export { RoomHub };
 
 const app = new Hono();
 app.use("*", logger());
-app.use(
-  "*",
-  cors({
-    origin: "*",
+app.use("*", (c, next) => {
+  const allowedOrigins = (c.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  return cors({
+    origin: (origin) => {
+      if (!origin) return null;
+      if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+        return origin;
+      }
+      return null;
+    },
     allowHeaders: ["Authorization", "Content-Type"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  })
-);
+  })(c, next);
+});
 
 app.get("/", (c) =>
   c.json({
