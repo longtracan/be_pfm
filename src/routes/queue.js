@@ -103,9 +103,18 @@ route.post(
     const body = c.get("requestBody") || {};
     const roomId = String(body.room_id || "").trim();
     const rawQrContent = String(body.qr_content || body.qr || "").trim();
+    const queueDate = String(body.queue_date || "").trim() || formatDateKey();
 
     if (!roomId) {
       return c.json({ ok: false, error: "room_id_required" }, 400);
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(queueDate)) {
+      return c.json({ ok: false, error: "invalid_queue_date" }, 400);
+    }
+
+    if (queueDate !== formatDateKey()) {
+      return c.json({ ok: false, error: "scan_only_today_allowed", today: formatDateKey() }, 400);
     }
 
     const parsedQr = parseQrContent(rawQrContent);
@@ -138,7 +147,7 @@ route.post(
       throw err;
     }
 
-    const existingQueue = await findLatestActiveQueueForPatientRoom(db, patient.id, roomId);
+    const existingQueue = await findLatestActiveQueueForPatientRoom(db, patient.id, roomId, queueDate);
     if (existingQueue) {
       if (existingQueue.status === QUEUE_STATUS.CHO_KET_QUA) {
         const updatedQueue = await updateQueueStatus(db, {
@@ -180,6 +189,7 @@ route.post(
       db,
       patient,
       roomId,
+      queueDate,
       isPriority: !!patient.is_priority,
       createdBy: auth.user_id,
       note: "scan_create_queue",

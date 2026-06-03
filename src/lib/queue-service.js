@@ -114,8 +114,7 @@ export async function ensureRoomExists(db, roomId) {
   return room;
 }
 
-export async function nextQueueNumber(db, roomId) {
-  const dateKey = formatDateKey();
+export async function nextQueueNumber(db, roomId, dateKey = formatDateKey()) {
   const batchResults = await db.batch([
     db.prepare("INSERT OR IGNORE INTO counters (room_id, date_key, value) VALUES (?, ?, 0)").bind(roomId, dateKey),
     db.prepare("UPDATE counters SET value = value + 1 WHERE room_id = ? AND date_key = ?").bind(roomId, dateKey),
@@ -146,12 +145,12 @@ export async function appendQueueEvent(db, event) {
     .run();
 }
 
-async function nextOrderRank(db, roomId, isPriority) {
+async function nextOrderRank(db, roomId, isPriority, queueDate = formatDateKey()) {
   const priorityRank = isPriority ? 0 : 1;
   const ph = WAITING_QUEUE_STATUSES.map(() => "?").join(",");
   const { results } = await db
-    .prepare(`SELECT order_rank FROM queues WHERE room_id = ? AND status IN (${ph}) AND priority_rank = ? ORDER BY order_rank ASC`)
-    .bind(roomId, ...WAITING_QUEUE_STATUSES, priorityRank)
+    .prepare(`SELECT order_rank FROM queues WHERE room_id = ? AND queue_date = ? AND status IN (${ph}) AND priority_rank = ? ORDER BY order_rank ASC`)
+    .bind(roomId, queueDate, ...WAITING_QUEUE_STATUSES, priorityRank)
     .all();
   if (results.length === 0) return 1;
   const ranks = results.map((r) => Number(r.order_rank || 0)).filter((n) => Number.isFinite(n));
@@ -163,15 +162,16 @@ export async function createQueueItem({
   db,
   patient,
   roomId,
+  queueDate = formatDateKey(),
   isPriority,
   createdBy,
   note,
 }) {
   const room = await ensureRoomExists(db, roomId);
-  const queueNumber = await nextQueueNumber(db, roomId);
+  const queueNumber = await nextQueueNumber(db, roomId, queueDate);
   const now = Date.now();
   const priorityRank = isPriority ? 0 : 1;
-  const orderRank = await nextOrderRank(db, roomId, isPriority);
+  const orderRank = await nextOrderRank(db, roomId, isPriority, queueDate);
   const queueId = crypto.randomUUID();
 
   await db
@@ -188,7 +188,7 @@ export async function createQueueItem({
       patient.patient_key,
       roomId,
       room.floor_id || null,
-      formatDateKey(),
+      queueDate,
       QUEUE_STATUS.CHO_KHAM,
       queueNumber,
       isPriority ? 1 : 0,
@@ -217,7 +217,7 @@ export async function createQueueItem({
     patient_key: patient.patient_key,
     room_id: roomId,
     floor_id: room.floor_id || null,
-    queue_date: formatDateKey(),
+    queue_date: queueDate,
     status: QUEUE_STATUS.CHO_KHAM,
     queue_number: queueNumber,
     is_priority: isPriority ? 1 : 0,
@@ -234,11 +234,11 @@ export async function findQueueById(db, queueId) {
   return db.prepare("SELECT * FROM queues WHERE id = ? LIMIT 1").bind(queueId).first();
 }
 
-export async function findLatestActiveQueueForPatientRoom(db, patientId, roomId) {
+export async function findLatestActiveQueueForPatientRoom(db, patientId, roomId, queueDate = formatDateKey()) {
   const ph = ACTIVE_QUEUE_STATUSES.map(() => "?").join(",");
   return db
-    .prepare(`SELECT * FROM queues WHERE patient_id = ? AND room_id = ? AND status IN (${ph}) ORDER BY created_at DESC, order_rank DESC LIMIT 1`)
-    .bind(patientId, roomId, ...ACTIVE_QUEUE_STATUSES)
+    .prepare(`SELECT * FROM queues WHERE patient_id = ? AND room_id = ? AND queue_date = ? AND status IN (${ph}) ORDER BY created_at DESC, order_rank DESC LIMIT 1`)
+    .bind(patientId, roomId, queueDate, ...ACTIVE_QUEUE_STATUSES)
     .first();
 }
 
