@@ -1,3 +1,7 @@
-# Wrangler local development secrets — template
-# Copy to .dev.vars and fill in values.
-JWT_SECRET=pfm_local_dev_secret_change_me_in_production
+# Local dev secrets cho wrangler dev --local
+# Copy file này sang .dev.vars (không commit .dev.vars)
+
+# JWT secret dùng khi chạy local — min 32 ký tự
+# Tạo: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+JWT_SECRET=dev_secret_change_me_min_32_chars_long
+

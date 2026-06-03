@@ -3,6 +3,9 @@ main = "src/index.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+# ── PRODUCTION (default) ─────────────────────────────────────────────────────
+# wrangler deploy  →  pfm-backend.<subdomain>.workers.dev
+
 [vars]
 NODE_ENV = "production"
 
@@ -18,3 +21,22 @@ bindings = [{ name = "ROOM_HUB", class_name = "RoomHub" }]
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomHub"]
+
+# ── PREVIEW / DEV (CF remote) ────────────────────────────────────────────────
+# wrangler deploy --env preview  →  pfm-backend-preview.<subdomain>.workers.dev
+# wrangler dev --env preview     →  kết nối D1 remote dev
+
+[env.preview]
+name = "pfm-backend-preview"
+
+[env.preview.vars]
+NODE_ENV = "development"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "pfm_dts_dev"
+database_id = "58da8ea4-efb6-46ef-8137-7fd0dac324c3"
+migrations_dir = "migrations"
+
+[env.preview.durable_objects]
+bindings = [{ name = "ROOM_HUB", class_name = "RoomHub" }]

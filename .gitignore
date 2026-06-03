@@ -8,11 +8,20 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+dist
 .output
 stats.html
 stats-*.json
 .wxt
 web-ext.config.ts
+
+# Wrangler local state
+.wrangler/
+
+# Local env / secrets — không commit
+.env
+.env.local
+.dev.vars
 
 # Editor directories and files
 .vscode/*

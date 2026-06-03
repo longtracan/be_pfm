@@ -5,10 +5,17 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --local",
+    "dev:remote": "wrangler dev --remote --env preview",
     "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply pfm_dts",
-    "db:migrate:local": "wrangler d1 migrations apply pfm_dts --local"
+    "deploy:preview": "wrangler deploy --env preview",
+    "db:migrate": "wrangler d1 migrations apply pfm_dts --remote",
+    "db:migrate:preview": "wrangler d1 migrations apply pfm_dts_dev --remote --env preview",
+    "db:migrate:local": "wrangler d1 migrations apply pfm_dts --local",
+    "db:seed": "wrangler d1 execute pfm_dts --remote --file migrations/0002_seed.sql",
+    "db:seed:preview": "wrangler d1 execute pfm_dts_dev --remote --env preview --file migrations/0002_seed.sql",
+    "logs": "wrangler tail pfm-backend",
+    "logs:errors": "wrangler tail pfm-backend --status error"
   },
   "keywords": [],
   "author": "",

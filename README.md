@@ -1,10 +1,114 @@
 # backend-pfm
 
-Backend can truoc mat cua PFM, dung Hono (JavaScript) + MongoDB.
-Tai lieu chuan ve flow va rang buoc:
+Backend PFM — Cloudflare Workers + Hono (JavaScript) + D1 (SQLite) + Durable Objects.
 
-- [PFM Technical Specification](/Users/thuanluuquang/Documents/pfm-dts/docs/OVERVIEW.md)
-- [API Guide](/Users/thuanluuquang/Documents/pfm-dts/docs/api-guide.md)
+## Stack
+
+- **Runtime**: Cloudflare Workers
+- **Framework**: Hono v4
+- **Database**: Cloudflare D1 (SQLite)
+- **Realtime**: Durable Objects (WebSocket)
+- **Auth**: JWT via `jose`
+
+## Yêu cầu
+
+- Node.js >= 20
+- `npm install -g wrangler` (>= 3.x)
+- Tài khoản Cloudflare
+
+## Quick start (local)
+
+```bash
+npm install
+
+# Chạy với D1 SQLite local (không cần internet, không tốn quota)
+npm run dev
+# → http://localhost:8787
+
+# Apply migrations vào SQLite local lần đầu
+npm run db:migrate:local
+```
+
+## Local secrets
+
+Tạo file `.dev.vars` (không commit — đã có trong `.gitignore`):
+```
+JWT_SECRET=dev_secret_change_me_min_32_chars_long
+```
+Wrangler tự load file này khi chạy `wrangler dev`.
+
+## Scripts
+
+| Script | Mô tả |
+|---|---|
+| `npm run dev` | Chạy local với D1 SQLite local |
+| `npm run dev:remote` | Chạy local, kết nối D1 remote (env preview) |
+| `npm run deploy` | Deploy production |
+| `npm run deploy:preview` | Deploy preview/staging |
+| `npm run db:migrate` | Apply migration lên D1 production |
+| `npm run db:migrate:preview` | Apply migration lên D1 dev |
+| `npm run db:migrate:local` | Apply migration local SQLite |
+| `npm run db:seed` | Seed dữ liệu vào production DB |
+| `npm run db:seed:preview` | Seed dữ liệu vào preview DB |
+| `npm run logs` | Xem logs Workers real-time |
+| `npm run logs:errors` | Xem chỉ error logs |
+
+## Cài đặt & Deploy
+
+Xem tài liệu đầy đủ tại [frontend-pfm/docs/03-deploy-va-kiem-soat.md](../frontend-pfm/docs/03-deploy-va-kiem-soat.md).
+
+## Test routes (localhost:8787)
+
+```bash
+# Check DB
+curl http://localhost:8787/api/check-db
+
+# Login
+curl -X POST http://localhost:8787/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"superadmin","password":"superadmin123"}'
+
+# Check auth (thay <TOKEN> bằng token từ login)
+curl -H "Authorization: Bearer <TOKEN>" http://localhost:8787/api/check-auth
+```
+
+## Postman
+
+Files:
+- `postman/PFM_Backend.postman_collection.json`
+- `postman/PFM_Backend.dev.postman_environment.json`
+- `postman/PFM_Backend.prod.postman_environment.json`
+
+Request `Login (Auto Save Token)` tự lưu `token` vào environment đang chọn.
+
+## Project structure
+
+```
+src/
+  index.js
+  durable-objects/
+    RoomHub.js
+  lib/
+    auth.js
+    constants.js
+    db.js
+    queue-events.js
+    queue-service.js
+  middleware/
+    auth.js
+  routes/
+    auth.js
+    check-auth.js
+    check-db.js
+    events.js
+    modules.js
+    patients.js
+    queue.js
+migrations/
+  0001_schema.sql
+  0002_seed.sql
+```
+
 
 ## Node version
 
