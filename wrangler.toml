@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 NODE_ENV = "production"
-ALLOWED_ORIGINS = "https://fe.pkdts.workers.dev"
+ALLOWED_ORIGINS = "https://site.pkdkdts.workers.dev"
 
 [[d1_databases]]
 binding = "DB"
@@ -32,7 +32,7 @@ name = "pfm-backend-preview"
 
 [env.preview.vars]
 NODE_ENV = "development"
-ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+ALLOWED_ORIGINS = "*"
 
 [[env.preview.d1_databases]]
 binding = "DB"

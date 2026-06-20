@@ -20,8 +20,11 @@ app.use("*", (c, next) => {
     .map((o) => o.trim())
     .filter(Boolean);
 
+  const allowAll = allowedOrigins.includes("*");
+
   return cors({
     origin: (origin) => {
+      if (allowAll) return origin || "*";
       if (!origin) return null;
       if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
         return origin;
