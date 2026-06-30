@@ -465,6 +465,9 @@ export async function sortQueueViewDocs(db, queueDocs) {
   }
   return items.sort((a, b) => {
     if (a.priority_rank !== b.priority_rank) return a.priority_rank - b.priority_rank;
+    if (a.status === 'CHO_TAI_KHAM' && b.status === 'CHO_TAI_KHAM') {
+      return (a.updated_at || 0) - (b.updated_at || 0);
+    }
     if (a.order_rank !== b.order_rank) return a.order_rank - b.order_rank;
     return (a.created_at || 0) - (b.created_at || 0);
   });
