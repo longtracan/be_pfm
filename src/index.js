@@ -20,7 +20,9 @@ app.use("*", (c, next) => {
     .map((o) => o.trim())
     .filter(Boolean);
 
-  const allowAll = allowedOrigins.includes("*");
+  const requestUrl = new URL(c.req.url);
+  const isLocalHost = requestUrl.hostname === "localhost" || requestUrl.hostname === "127.0.0.1";
+  const allowAll = allowedOrigins.includes("*") || isLocalHost;
 
   return cors({
     origin: (origin) => {
