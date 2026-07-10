@@ -37,18 +37,22 @@ export function toBoolean(value, fallback = false) {
   return fallback;
 }
 
+const DEFAULT_IDENTITY_NUMBER_FALLBACK = "000000000000";
+
 export function parsePatientPayload(raw = {}) {
   const medicalCode = normalizeText(
     raw.medical_code ?? raw.medicalCode ?? raw.mayte ?? raw.ma_y_te ?? ""
   );
+  // identity_number không bắt buộc — tự fill fallback nếu trống
   const identityNumber = normalizeText(
     raw.identity_number ?? raw.identityNumber ?? raw.socmt ?? raw.cccd ?? raw.cmnd ?? ""
-  );
+  ) || DEFAULT_IDENTITY_NUMBER_FALLBACK;
 
   return {
     medical_code: medicalCode,
     identity_number: identityNumber,
-    patient_key: medicalCode && identityNumber ? `${medicalCode}|${identityNumber}` : "",
+    // patient_key chỉ cần medicalCode (identityNumber luôn có giá trị do fallback)
+    patient_key: medicalCode ? `${medicalCode}|${identityNumber}` : "",
     full_name: String(raw.full_name ?? raw.fullName ?? raw.hoten ?? raw.name ?? "").trim(),
     dob: String(raw.dob ?? raw.namsinh ?? raw.ngaysinh ?? "").trim(),
     gender: String(raw.gender ?? raw.gioitinh ?? "").trim(),
@@ -256,10 +260,14 @@ export async function findPatientByKey(db, patientKey) {
 export async function upsertPatient(db, patientData) {
   const now = Date.now();
   const medicalCode = String(patientData.medical_code || "").trim();
-  const identityNumber = String(patientData.identity_number || "").trim();
-  const patientKey = String(patientData.patient_key || "").trim();
+  // identity_number không bắt buộc — dùng fallback nếu trống
+  const identityNumber = String(patientData.identity_number || "").trim() || DEFAULT_IDENTITY_NUMBER_FALLBACK;
+  // Rebuild patient_key nếu bị rỗng (phòng trường hợp caller không tự build)
+  const patientKey = String(patientData.patient_key || "").trim()
+    || (medicalCode ? `${medicalCode}|${identityNumber}` : "");
 
-  if (!medicalCode || !identityNumber || !patientKey) throw new Error("patient_key_required");
+  // Chỉ còn ràng buộc cứng medical_code và patient_key (identity đã có fallback)
+  if (!medicalCode || !patientKey) throw new Error("patient_key_required");
 
   const sourcePayloadJson = patientData.source_payload
     ? JSON.stringify(patientData.source_payload)
@@ -502,7 +510,7 @@ export async function toQueueView(db, queueDoc) {
     room_id: queueDoc.room_id,
     floor_id: queueDoc.floor_id,
     is_priority: !!queueDoc.is_priority,
-    priority_rank: Number(queueDoc.priority_rank || 1),
+    priority_rank: Number(queueDoc.priority_rank ?? 1),
     order_rank: Number(queueDoc.order_rank || 0),
     created_at: queueDoc.created_at,
     updated_at: queueDoc.updated_at,
